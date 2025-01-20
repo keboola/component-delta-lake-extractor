@@ -1,19 +1,241 @@
 {
   "type": "object",
-  "title": "extractor configuration",
+  "title": "Component configuration",
   "required": [
-    "print_hello"
+    "auth",
+    "source",
+    "data_selection",
+    "destination",
+    "debug"
   ],
   "properties": {
-    "print_hello": {
-      "type": "boolean",
-      "title": "Print Hello",
+    "auth": {
+      "type": "object",
+      "title": "Authorization",
+      "required": [
+        "account_name",
+        "#sas_token"
+      ],
+      "properties": {
+        "account_name": {
+          "type": "string",
+          "title": "Storage Account Name",
+          "propertyOrder": 11
+        },
+        "#sas_token": {
+          "type": "string",
+          "title": "SAS token",
+          "format": "password",
+          "propertyOrder": 12
+        }
+      },
       "propertyOrder": 1
+    },
+    "source": {
+      "type": "object",
+      "title": "Data source",
+      "required": [
+        "container_name",
+        "blob_name"
+      ],
+      "properties": {
+        "container_name": {
+          "type": "string",
+          "title": "Container name",
+          "propertyOrder": 21
+        },
+        "blob_name": {
+          "type": "string",
+          "title": "Blob name",
+          "propertyOrder": 22
+        },
+        "table_preview": {
+          "type": "button",
+          "format": "sync-action",
+          "options": {
+            "async": {
+              "label": "Table preview",
+              "action": "table_preview"
+            }
+          },
+          "propertyOrder": 500
+        }
+      },
+      "propertyOrder": 2
+    },
+    "data_selection": {
+      "type": "object",
+      "title": "Data selection",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "all_data",
+            "select_columns",
+            "custom_query"
+          ],
+          "type": "string",
+          "title": "Load Type",
+          "default": "all_data",
+          "options": {
+            "enum_titles": [
+              "All Data",
+              "Select Columns",
+              "Custom Query"
+            ]
+          },
+          "propertyOrder": 31
+        },
+        "query": {
+          "type": "string",
+          "title": "Query",
+          "description": "The SQL query that will be used to extract data. Use the placeholder in_table to reference the input table in your query. For example: `SELECT * FROM in_table WHERE is_active = true`",
+          "propertyOrder": 32,
+          "options": {
+            "tooltip": "For query preview, a LIMIT 10 is automatically added to ensure completion within the 30-second time limit for sync actions. When the query is run as a job, it is executed without any modifications.",
+            "dependencies": {
+              "mode": "custom_query"
+            }
+          }
+        },
+        "table_preview": {
+          "type": "button",
+          "format": "sync-action",
+          "options": {
+            "async": {
+              "label": "Query preview",
+              "action": "query_preview"
+            },
+            "dependencies": {
+              "mode": "custom_query"
+            }
+          },
+          "propertyOrder": 33
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "enum": [],
+            "type": "string"
+          },
+          "title": "Columns to extract",
+          "format": "select",
+          "options": {
+            "tags": true,
+            "async": {
+              "label": "Re-load columns",
+              "action": "list_columns"
+            },
+            "dependencies": {
+              "mode": "select_columns"
+            }
+          },
+          "uniqueItems": true,
+          "propertyOrder": 34
+        }
+      },
+      "propertyOrder": 3
+    },
+    "destination": {
+      "type": "object",
+      "title": "Destination",
+      "required": [
+        "load_type"
+      ],
+      "properties": {
+        "parquet_output": {
+          "type": "boolean",
+          "title": "Store result as parquet",
+          "format": "checkbox",
+          "default": false,
+          "description": "If enabled, the extractor will store result as parquet file into file storage instead of table",
+          "propertyOrder": 41
+        },
+        "load_type": {
+          "enum": [
+            "incremental_load",
+            "full_load"
+          ],
+          "type": "string",
+          "title": "Load Type",
+          "default": "incremental_load",
+          "options": {
+            "enum_titles": [
+              "Incremental Load",
+              "Full Load"
+            ],
+            "dependencies": {
+              "parquet_output": false
+            }
+          },
+          "description": "If Full load is used, the destination table will be overwritten every run. If Incremental Load is used, data will be upserted into the destination table based on the primary key. Append modes do not contain any primary keys and are not deduplicated.",
+          "propertyOrder": 42
+        },
+        "primary_key": {
+          "type": "array",
+          "items": {
+            "enum": [],
+            "type": "string"
+          },
+          "title": "Primary key",
+          "format": "select",
+          "options": {
+            "tags": true,
+            "async": {
+              "label": "Re-load columns",
+              "action": "list_columns"
+            },
+            "dependencies": {
+              "parquet_output": false
+            }
+          },
+          "uniqueItems": true,
+          "propertyOrder": 43
+        },
+        "table_name": {
+          "type": "string",
+          "title": "Table name",
+          "default": "",
+          "description": "(Optional) Specify the table name (without the filetype) if you leave this field empty, the default name container_blob will be used.",
+          "options": {
+            "dependencies": {
+              "parquet_output": false
+            }
+          },
+          "propertyOrder": 44
+        },
+        "file_name": {
+          "type": "string",
+          "title": "File name",
+          "default": "",
+          "description": "(Optional) Specify the file name (without the filetype) if you leave this field empty, the default name container_blob will be used. The resulting file will be named `<table_name>.parquet`",
+          "options": {
+            "dependencies": {
+              "parquet_output": true
+            }
+          },
+          "propertyOrder": 45
+        },
+        "preserve_insertion_order": {
+          "type": "boolean",
+          "title": "Preserve insertion order",
+          "format": "checkbox",
+          "default": true,
+          "description": "If enabled, the extractor will preserve the order of the rows in the destination table, when encountering OOM error, disabling this option may help",
+          "propertyOrder": 46
+        }
+      },
+      "propertyOrder": 4
     },
     "debug": {
       "type": "boolean",
-      "title": "Debug",
-      "propertyOrder": 2
+      "title": "Debug mode",
+      "format": "checkbox",
+      "default": false,
+      "description": "If enabled, the component will produce detailed logs",
+      "propertyOrder": 5
     }
   }
 }

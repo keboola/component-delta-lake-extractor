@@ -2,6 +2,7 @@ version: "2"
 services:
   # for development purposes
   dev:
+    mem_limit: 256m
     build: .
     volumes:
         - ./:/code

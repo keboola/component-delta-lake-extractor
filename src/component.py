@@ -2,86 +2,188 @@
 Template Component main class.
 
 """
-import csv
-from datetime import datetime
 import logging
+import os
+from collections import OrderedDict
 
-from keboola.component.base import ComponentBase
+import duckdb
+import polars
+from duckdb.duckdb import DuckDBPyConnection
+from keboola.component.base import ComponentBase, sync_action
+from keboola.component.dao import SupportedDataTypes, BaseType, ColumnDefinition
 from keboola.component.exceptions import UserException
+from keboola.component.sync_actions import SelectElement, ValidationResult, MessageType
 
 from configuration import Configuration
+import time
+
+DUCK_DB_DIR = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'duckdb')
 
 
 class Component(ComponentBase):
-    """
-        Extends base class for general Python components. Initializes the CommonInterface
-        and performs configuration validation.
-
-        For easier debugging the data folder is picked up by default from `../data` path,
-        relative to working directory.
-
-        If `debug` parameter is present in the `config.json`, the default logger is set to verbose DEBUG mode.
-    """
 
     def __init__(self):
         super().__init__()
+        self.params = Configuration(**self.configuration.parameters)
+        self._connection = self.init_connection()
 
     def run(self):
         """
         Main execution code
         """
 
-        # ####### EXAMPLE TO REMOVE
-        # check for missing configuration parameters
-        params = Configuration(**self.configuration.parameters)
+        table_name = self.get_table_name()
+        query = self.get_query()
 
-        # Access parameters in configuration
-        if params.print_hello:
-            logging.info("Hello World")
+        if self.params.destination.parquet_output:
+            out_file = self.create_out_file_definition(f"{table_name}.parquet")
+            q = f" COPY ({query}) TO '{out_file.full_path}'; "
+            logging.debug(f"Running query: {q}; ")
+            start = time.time()
+            self._connection.execute(q)
+            logging.debug(f"Query finished successfully in {time.time() - start} seconds")
+            self.write_manifest(out_file)
+        else:
 
-        # get input table definitions
-        input_tables = self.get_input_tables_definitions()
-        for table in input_tables:
-            logging.info(f'Received input table: {table.name} with path: {table.full_path}')
+            table_meta = self._connection.execute(f"""DESCRIBE {query};""").fetchall()
+            schema = OrderedDict((c[0], ColumnDefinition(data_types=BaseType(dtype=self.convert_base_types(c[1]))))
+                                 for c in table_meta)
 
-        if len(input_tables) == 0:
-            raise UserException("No input tables found")
+            out_table = self.create_out_table_definition(f"{table_name}.csv",
+                                                         schema=schema,
+                                                         primary_key=self.params.destination.primary_key,
+                                                         incremental=self.params.destination.incremental,
+                                                         )
 
-        # get last state data/in/state.json from previous run
-        previous_state = self.get_state_file()
-        logging.info(previous_state.get('some_parameter'))
+            try:
+                q = f"COPY ({query}) TO '{out_table.full_path}' (HEADER, DELIMITER ',', FORCE_QUOTE *)"
+                logging.debug(f"Running query: {q}; ")
+                start = time.time()
+                self._connection.execute(q)
+                logging.debug(f"Query finished successfully in {time.time() - start} seconds")
+            except duckdb.duckdb.ConversionException as e:
+                raise UserException(f"Error during query execution: {e}")
 
-        # Create output table (Table definition - just metadata)
-        table = self.create_out_table_definition('output.csv', incremental=True, primary_key=['timestamp'])
+            self.write_manifest(out_table)
+        self._connection.close()
 
-        # get file path of the table (data/out/tables/Features.csv)
-        out_table_path = table.full_path
-        logging.info(out_table_path)
+    def init_connection(self) -> DuckDBPyConnection:
+        """
+                Returns connection to temporary DuckDB database
+                """
+        os.makedirs(DUCK_DB_DIR, exist_ok=True)
+        # TODO: On GCP consider changin tmp to /opt/tmp
+        config = dict(temp_directory=DUCK_DB_DIR,
+                      extension_directory=os.path.join(DUCK_DB_DIR, 'extensions'),
+                      threads=self.params.threads,
+                      memory_limit=f"{self.params.max_memory}MB",
+                      max_memory=f"{self.params.max_memory}MB")
+        conn = duckdb.connect(config=config)
 
-        # Add timestamp column and save into out_table_path
-        input_table = input_tables[0]
-        with (open(input_table.full_path, 'r') as inp_file,
-              open(table.full_path, mode='wt', encoding='utf-8', newline='') as out_file):
-            reader = csv.DictReader(inp_file)
+        duck_conn_str = (f'AccountName={self.params.auth.account_name};'
+                         f'SharedAccessSignature={self.params.auth.sas_token}')
 
-            columns = list(reader.fieldnames)
-            # append timestamp
-            columns.append('timestamp')
+        conn.execute(f"""
+                CREATE SECRET (
+                    TYPE AZURE,
+                    CONNECTION_STRING '{duck_conn_str}'
+                );
+                SET azure_transport_option_type = 'curl';
+                """).fetchall()
 
-            # write result with column added
-            writer = csv.DictWriter(out_file, fieldnames=columns)
-            writer.writeheader()
-            for in_row in reader:
-                in_row['timestamp'] = datetime.now().isoformat()
-                writer.writerow(in_row)
+        if not self.params.destination.preserve_insertion_order:
+            conn.execute("SET preserve_insertion_order = false;").fetchall()
 
-        # Save table manifest (output.csv.manifest) from the Table definition
-        self.write_manifest(table)
+        return conn
 
-        # Write new state - will be available next run
-        self.write_state_file({"some_state_parameter": "value"})
+    def get_table_name(self):
+        if not (self.params.destination.table_name or self.params.destination.file_name):
+            table_name = f"{self.params.source.container_name}-{self.params.source.blob_name}"
+        else:
+            table_name = self.params.destination.table_name or self.params.destination.file_name
+        return table_name
 
-        # ####### EXAMPLE TO REMOVE END
+    def get_query(self):
+        if self.params.data_selection.mode == "custom_query":
+            query = (self.params.data_selection.query
+                     .lower()
+                     .replace("from in_table ",
+                              f"FROM "
+                              f"delta_scan('az://{self.params.source.container_name}/{self.params.source.blob_name}')"))
+        elif self.params.data_selection.mode == "select_columns":
+            query = f"""
+            SELECT {', '.join(self.params.data_selection.columns)}
+            FROM delta_scan('az://{self.params.source.container_name}/{self.params.source.blob_name}')"""
+        elif self.params.data_selection.mode == "all_data":
+            query = (f"SELECT * "
+                     f"FROM delta_scan('az://{self.params.source.container_name}/{self.params.source.blob_name}')")
+        else:
+            raise UserException("Invalid data selection mode")
+
+        return query
+
+    def convert_base_types(self, dtype: str) -> SupportedDataTypes:
+        if dtype in ['TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT', 'HUGEINT',
+                     'UTINYINT', 'USMALLINT', 'UINTEGER', 'UBIGINT', 'UHUGEINT']:
+            return SupportedDataTypes.INTEGER
+        elif dtype in ['REAL', 'DECIMAL']:
+            return SupportedDataTypes.NUMERIC
+        elif dtype == 'DOUBLE':
+            return SupportedDataTypes.FLOAT
+        elif dtype == 'BOOLEAN':
+            return SupportedDataTypes.BOOLEAN
+        elif dtype in ['TIMESTAMP', 'TIMESTAMP WITH TIME ZONE']:
+            return SupportedDataTypes.TIMESTAMP
+        elif dtype == 'DATE':
+            return SupportedDataTypes.DATE
+        else:
+            return SupportedDataTypes.STRING
+
+    @sync_action("list_columns")
+    def list_columns(self):
+
+        out = self._connection.execute(f"""
+        DESCRIBE
+        FROM delta_scan('az://{self.params.source.container_name}/{self.params.source.blob_name}');
+        """).fetchall()
+
+        column_names = [SelectElement(c[0], f"{c[0]} ({c[1]})") for c in out]
+
+        return column_names
+
+    @sync_action("table_preview")
+    def table_preview(self):
+
+        out = self._connection.execute(f"""
+                SELECT *
+                FROM delta_scan('az://{self.params.source.container_name}/{self.params.source.blob_name}')
+                LIMIT 10;
+                """).pl()
+
+        formatted_output = self.to_markdown(out)
+
+        return ValidationResult(formatted_output, MessageType.SUCCESS)
+
+    def to_markdown(self, out):
+        polars.Config.set_tbl_formatting("ASCII_MARKDOWN")
+        polars.Config.set_tbl_hide_dataframe_shape(True)
+        formatted_output = str(out)
+        return formatted_output
+
+    @sync_action("query_preview")
+    def query_preview(self):
+
+        query = (self.params.data_selection.query
+                 .lower()
+                 .replace("from in_table",
+                          f"FROM delta_scan('az://{self.params.source.container_name}/"
+                          f"{self.params.source.blob_name}')"))
+
+        out = self._connection.execute(f"{query} LIMIT 10;").pl()
+
+        formatted_output = self.to_markdown(out)
+
+        return ValidationResult(formatted_output, MessageType.SUCCESS)
 
 
 """
