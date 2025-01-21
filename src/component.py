@@ -53,6 +53,7 @@ class Component(ComponentBase):
                                                          schema=schema,
                                                          primary_key=self.params.destination.primary_key,
                                                          incremental=self.params.destination.incremental,
+                                                         has_header=True
                                                          )
 
             try:
