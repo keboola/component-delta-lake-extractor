@@ -15,11 +15,6 @@ class LoadType(str, Enum):
     incremental_load = "incremental_load"
 
 
-class Auth(BaseModel):
-    account_name: str = Field()
-    sas_token: str = Field(alias="#sas_token")
-
-
 class Source(BaseModel):
     container_name: str = Field()
     blob_name: str = Field()
@@ -45,7 +40,14 @@ class Destination(BaseModel):
 
 
 class Configuration(BaseModel):
-    auth: Auth
+    provider: str
+    abs_account_name: str = None
+    abs_sas_token: str = Field(alias="#abs_sas_token", default=None)
+    aws_region: str = None
+    aws_key_id: str = None
+    aws_key_secret: str = Field(alias="#aws_key_secret", default=None)
+    gcp_hmac_id: str = None
+    gcp_hmac_secret: str = Field(alias="#gcp_hmac_secret", default=None)
     source: Source
     data_selection: DataSelection
     destination: Destination

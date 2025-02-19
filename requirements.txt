@@ -4,6 +4,6 @@ keboola.http-client
 freezegun
 mock
 pydantic==2.10.1
-duckdb==1.1.3
+duckdb==1.2.0
 polars
 pyarrow
