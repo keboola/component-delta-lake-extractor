@@ -1,51 +1,28 @@
 Data Lake Tables
 =============
 
-Description
+Component supports 2 access modes:
 
-**Table of contents:**
+### 1. Direct Access to Delta Tables
+Direct access to delta tables in your blob storage. We currently support the following providers:
 
-[TOC]
+- **AWS S3**: [Access Grants Credentials](https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-grants-credentials.html)
+- **Azure Blob Storage**: [Create SAS Tokens](https://learn.microsoft.com/en-us/azure/ai-services/translator/document-translation/how-to-guides/create-sas-tokens?tabs=Containers#create-sas-tokens-in-the-azure-portal)
+- **Google Cloud Storage**: [Managing HMAC Keys](https://cloud.google.com/storage/docs/authentication/managing-hmackeys#console)
 
-Functionality notes
-===================
+In this mode, the Delta Table path is defined by specifying the bucket/container and blob location where the table data is stored.
 
-Prerequisites
-=============
+### 2. Unity Catalog
+Currently we support only Azure Blob Storage backend.
 
-Get the API token, register application, etc.
+**Setup Requirements:**
+- **Access Token**: [How to get access token in Databricks](https://docs.databricks.com/aws/en/dev-tools/auth/pat#databricks-personal-access-tokens-for-workspace-users)
+- **External Data Access**: [Enable external data access on the metastore](https://docs.databricks.com/aws/en/external-access/admin#enable-external-data-access-on-the-metastore)
+- **Permissions**: Grant EXTERNAL USE SCHEMA permission
+  - Navigate to: Workspace > Permissions > Add external use schema
 
-Features
-========
+In this mode, the user selects the catalog, schema, and table from the Unity Catalog interface.
 
-| **Feature**             | **Note**                                      |
-|-------------------------|-----------------------------------------------|
-| Generic UI form         | Dynamic UI form                               |
-| Row Based configuration | Allows structuring the configuration in rows. |
-| oAuth                   | oAuth authentication enabled                  |
-| Incremental loading     | Allows fetching data in new increments.       |
-| Backfill mode           | Support for seamless backfill setup.          |
-| Date range filter       | Specify date range.                           |
-
-Supported endpoints
-===================
-
-If you need more endpoints, please submit your request to
-[ideas.keboola.com](https://ideas.keboola.com/)
-
-Configuration
-=============
-
-Param 1
--------
-
-Param 2
--------
-
-Output
-======
-
-List of tables, foreign keys, schema.
 
 Development
 -----------

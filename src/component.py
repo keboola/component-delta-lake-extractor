@@ -8,6 +8,9 @@ import os
 import time
 from collections import OrderedDict
 
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.catalog import TableOperation
+import databricks.sdk.errors as dbx_errors
 import duckdb
 import polars
 from duckdb.duckdb import DuckDBPyConnection
@@ -25,7 +28,7 @@ class Component(ComponentBase):
     def __init__(self):
         super().__init__()
         self.params = Configuration(**self.configuration.parameters)
-        self._connection = self.init_connection()
+        self._connection = None
         self.source_uri = self.build_source_uri()
 
     def run(self):
@@ -33,6 +36,7 @@ class Component(ComponentBase):
         Main execution code
         """
 
+        self._connection = self.init_connection()
         table_name = self.get_table_name()
         query = self.get_query()
 
@@ -91,12 +95,28 @@ class Component(ComponentBase):
 
         return conn
 
+    def _get_temp_credentials(self):
+        w = WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+        try:
+            creds = w.temporary_table_credentials.generate_temporary_table_credentials(
+                operation=TableOperation.READ, table_id=self.params.source.table
+            )
+            return creds
+        except dbx_errors.platform.PermissionDenied as e:
+            raise UserException(f"Permission denied: {str(e)}")
+
     def build_connection_query(self):
+        if self.params.access_method == "unity_catalog":
+            temp_creds = self._get_temp_credentials()
+            self.params.provider = "abs"  # Unity Catalog only supports ABS for now
+            self.params.abs_account_name = temp_creds.url.split("@")[1].split(".")[0]
+            self.params.abs_sas_token = temp_creds.azure_user_delegation_sas.sas_token
+            self.source_uri = temp_creds.url
+
         match self.params.provider:
             case "abs":
                 abs_conn_str = (
-                    f"AccountName={self.params.abs_account_name};"
-                    f"SharedAccessSignature={self.params.abs_sas_token}"
+                    f"AccountName={self.params.abs_account_name};SharedAccessSignature={self.params.abs_sas_token}"
                 )
                 query = f"""
                         CREATE SECRET (
@@ -136,7 +156,7 @@ class Component(ComponentBase):
             case "gcs":
                 source_uri = f"gs://{self.params.source.container_name}/{self.params.source.blob_name}"
             case _:
-                raise UserException(f"Unknown provider: {self.params.provider}")
+                source_uri = None
 
         return source_uri
 
@@ -192,6 +212,8 @@ class Component(ComponentBase):
 
     @sync_action("list_columns")
     def list_columns(self):
+        self._connection = self.init_connection()
+
         out = self._connection.execute(f"""
         DESCRIBE
         FROM delta_scan('{self.source_uri}');
@@ -203,6 +225,8 @@ class Component(ComponentBase):
 
     @sync_action("table_preview")
     def table_preview(self):
+        self._connection = self.init_connection()
+
         out = self._connection.execute(f"""
                 SELECT *
                 FROM delta_scan('{self.source_uri}')
@@ -221,6 +245,8 @@ class Component(ComponentBase):
 
     @sync_action("query_preview")
     def query_preview(self):
+        self._connection = self.init_connection()
+
         query = self.params.data_selection.query.lower().replace(
             "from in_table", f"FROM delta_scan('{self.source_uri}')"
         )
@@ -233,6 +259,57 @@ class Component(ComponentBase):
         formatted_output = self.to_markdown(out)
 
         return ValidationResult(formatted_output, MessageType.SUCCESS)
+
+    @sync_action("list_uc_catalogs")
+    def list_uc_catalogs(self):
+        w = WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+        catalogs = w.catalogs.list()
+        return [SelectElement(c.name) for c in catalogs]
+
+    @sync_action("list_uc_schemas")
+    def list_uc_schemas(self):
+        w = WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+        schemas = w.schemas.list(self.params.source.catalog)
+        return [SelectElement(s.name) for s in schemas]
+
+    @sync_action("list_uc_tables")
+    def list_uc_tables(self):
+        w = WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+        tables = w.tables.list(self.params.source.catalog, self.params.source.schema_name)
+        return [SelectElement(value=t.table_id, label=t.name) for t in tables]
+
+    @sync_action("access_method_helper")
+    def access_method_helper(self):
+        """
+        Method to return the access method to the config row, so we can render UI based on the selected method.
+        """
+        return {
+            "type": "data",
+            "data": {
+                "source": {
+                    "helper_access_method": self.params.access_method,
+                    "container_name": self.params.source.container_name,
+                    "blob_name": self.params.source.blob_name,
+                    "catalog": self.params.source.catalog,
+                    "schema_name": self.params.source.schema_name,
+                    "table": self.params.source.table,
+                },
+                "data_selection": {
+                    "mode": self.params.data_selection.mode,
+                    "columns": self.params.data_selection.columns,
+                    "query": self.params.data_selection.query,
+                },
+                "destination": {
+                    "preserve_insertion_order": self.params.destination.preserve_insertion_order,
+                    "parquet_output": self.params.destination.parquet_output,
+                    "file_name": self.params.destination.file_name,
+                    "table_name": self.params.destination.table_name,
+                    "load_type": self.params.destination.load_type,
+                    "primary_key": self.params.destination.primary_key,
+                },
+                "debug": self.params.debug,
+            },
+        }
 
 
 """

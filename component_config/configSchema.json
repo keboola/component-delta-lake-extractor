@@ -5,6 +5,44 @@
     "provider"
   ],
   "properties": {
+    "access_method": {
+      "enum": [
+        "unity_catalog",
+        "direct_storage"
+      ],
+      "type": "string",
+      "title": "Data Access Method",
+      "default": "direct_storage",
+      "options": {
+        "enum_titles": [
+          "Unity Catalog",
+          "Direct Storage Access"
+        ]
+      },
+      "required": true,
+      "propertyOrder": 1
+    },
+    "unity_catalog_url": {
+      "type": "string",
+      "title": "Unity Catalog URL",
+      "propertyOrder": 3,
+      "options": {
+        "dependencies": {
+          "access_method": "unity_catalog"
+        }
+      }
+    },
+    "#unity_catalog_token": {
+      "type": "string",
+      "title": "PAT token",
+      "format": "password",
+      "propertyOrder": 4,
+      "options": {
+        "dependencies": {
+          "access_method": "unity_catalog"
+        }
+      }
+    },
     "provider": {
       "enum": [
         "s3",
@@ -15,6 +53,9 @@
       "title": "Cloud Storage",
       "default": "full_sync",
       "options": {
+        "dependencies": {
+          "access_method": "direct_storage"
+        },
         "enum_titles": [
           "AWS S3",
           "Azure Blob Storage",
@@ -23,12 +64,12 @@
       },
       "required": true,
       "description": "Select the cloud storage provider.",
-      "propertyOrder": 1
+      "propertyOrder": 2
     },
     "abs_account_name": {
       "type": "string",
       "title": "Storage Account Name",
-      "propertyOrder": 2,
+      "propertyOrder": 3,
       "options": {
         "dependencies": {
           "provider": "abs"
@@ -39,7 +80,7 @@
       "type": "string",
       "title": "SAS token",
       "format": "password",
-      "propertyOrder": 3,
+      "propertyOrder": 4,
       "options": {
         "dependencies": {
           "provider": "abs"
@@ -50,7 +91,7 @@
       "type": "string",
       "title": "AWS Region",
       "description": "The AWS region where the bucket is located for example 'eu-central-1' or 'us-east-1'.",
-      "propertyOrder": 4,
+      "propertyOrder": 5,
       "options": {
         "dependencies": {
           "provider": "s3"
@@ -60,7 +101,7 @@
     "aws_key_id": {
       "type": "string",
       "title": "Access key ID",
-      "propertyOrder": 5,
+      "propertyOrder": 6,
       "options": {
         "dependencies": {
           "provider": "s3"
@@ -71,7 +112,7 @@
       "type": "string",
       "title": "Secret Access Key",
       "format": "password",
-      "propertyOrder": 6,
+      "propertyOrder": 7,
       "options": {
         "dependencies": {
           "provider": "s3"
@@ -81,7 +122,7 @@
     "gcp_hmac_id": {
       "type": "string",
       "title": "HMAC Key Access ID",
-      "propertyOrder": 5,
+      "propertyOrder": 6,
       "options": {
         "dependencies": {
           "provider": "gcs"
@@ -92,7 +133,7 @@
       "type": "string",
       "title": "HMAC Key Secret",
       "format": "password",
-      "propertyOrder": 8,
+      "propertyOrder": 9,
       "options": {
         "dependencies": {
           "provider": "gcs"
