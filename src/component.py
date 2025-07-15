@@ -14,7 +14,7 @@ from keboola.component.dao import SupportedDataTypes, BaseType, ColumnDefinition
 from keboola.component.exceptions import UserException
 from keboola.component.sync_actions import SelectElement, ValidationResult, MessageType
 
-from configuration import Configuration
+from configuration import Configuration, AccessMethod
 
 DUCK_DB_DIR = os.path.join(os.environ.get("TMPDIR", "/tmp"), "duckdb")
 
@@ -100,7 +100,7 @@ class Component(ComponentBase):
 
     def build_connection_query(self):
         session_token = None
-        if self.params.access_method == "unity_catalog":
+        if self.params.access_method == AccessMethod.unity_catalog:
             w = WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
 
             temp_creds = self._get_temp_credentials(w)
@@ -115,7 +115,11 @@ class Component(ComponentBase):
 
             elif temp_creds.azure_user_delegation_sas:
                 self.params.provider = "abs"
-                self.params.abs_account_name = temp_creds.url.split("@")[1].split(".")[0]
+                try:
+                    # url should always have this pattern: ...@ACCOUNT_NAME.dfs... https://docs.databricks.com/aws/en/connect/storage/azure-storage?language=Account%C2%A0key#access-azure-storage  # noqa: E501
+                    self.params.abs_account_name = temp_creds.url.split("@")[1].split(".dfs")[0]
+                except IndexError:
+                    raise IndexError(f"Unable to extract account name from storage URL: {temp_creds.url}")
                 self.params.abs_sas_token = temp_creds.azure_user_delegation_sas.sas_token
 
             else:
