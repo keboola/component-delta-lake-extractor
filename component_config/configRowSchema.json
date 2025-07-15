@@ -262,7 +262,7 @@
           "type": "string",
           "title": "File name",
           "default": "",
-          "description": "(Optional) Specify the file name (without the filetype) if you leave this field empty, the default name container_blob will be used. The resulting file will be named `<table_name>.parquet`",
+          "description": "(Optional) Specify the file name (without the filetype) if you leave this field empty, the default name container-blob or catalog-schema-table will be used. The resulting file will be named `<table_name>.parquet`",
           "options": {
             "dependencies": {
               "parquet_output": true

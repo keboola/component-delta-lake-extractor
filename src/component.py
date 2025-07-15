@@ -172,7 +172,14 @@ class Component(ComponentBase):
 
     def get_table_name(self):
         if not (self.params.destination.table_name or self.params.destination.file_name):
-            table_name = f"{self.params.source.container_name}-{self.params.source.blob_name}"
+            parts = [
+                self.params.source.container_name,
+                self.params.source.blob_name,
+                self.params.source.catalog,
+                self.params.source.schema_name,
+                self.params.source.table,
+            ]
+            table_name = "-".join(filter(None, parts))
         else:
             table_name = self.params.destination.table_name or self.params.destination.file_name
         return table_name
