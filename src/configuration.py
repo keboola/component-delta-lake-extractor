@@ -43,6 +43,7 @@ class Destination(BaseModel):
     primary_key: list[str] = Field(default_factory=list)
 
     @computed_field
+    @property
     def incremental(self) -> bool:
         return self.load_type in (LoadType.incremental_load)
 

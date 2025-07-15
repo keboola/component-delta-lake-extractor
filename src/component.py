@@ -1,8 +1,3 @@
-"""
-Template Component main class.
-
-"""
-
 import logging
 import os
 import time
@@ -32,10 +27,6 @@ class Component(ComponentBase):
         self.source_uri = self.build_source_uri()
 
     def run(self):
-        """
-        Main execution code
-        """
-
         self._connection = self.init_connection()
         table_name = self.get_table_name()
         query = self.get_query()
@@ -95,23 +86,42 @@ class Component(ComponentBase):
 
         return conn
 
-    def _get_temp_credentials(self):
-        w = WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+    def _get_temp_credentials(self, w: WorkspaceClient):
         try:
+            src = self.params.source
+            table_id = w.tables.get(full_name=f"{src.catalog}.{src.schema_name}.{src.table}").table_id
+
             creds = w.temporary_table_credentials.generate_temporary_table_credentials(
-                operation=TableOperation.READ, table_id=self.params.source.table
+                operation=TableOperation.READ, table_id=table_id
             )
             return creds
         except dbx_errors.platform.PermissionDenied as e:
             raise UserException(f"Permission denied: {str(e)}")
 
     def build_connection_query(self):
+        session_token = None
         if self.params.access_method == "unity_catalog":
-            temp_creds = self._get_temp_credentials()
-            self.params.provider = "abs"  # Unity Catalog only supports ABS for now
-            self.params.abs_account_name = temp_creds.url.split("@")[1].split(".")[0]
-            self.params.abs_sas_token = temp_creds.azure_user_delegation_sas.sas_token
+            w = WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+
+            temp_creds = self._get_temp_credentials(w)
             self.source_uri = temp_creds.url
+
+            if temp_creds.aws_temp_credentials:
+                self.params.provider = "s3"
+                self.params.aws_region = w.metastores.summary().region
+                self.params.aws_key_id = temp_creds.aws_temp_credentials.access_key_id
+                self.params.aws_key_secret = temp_creds.aws_temp_credentials.secret_access_key
+                session_token = temp_creds.aws_temp_credentials.session_token
+
+            elif temp_creds.azure_user_delegation_sas:
+                self.params.provider = "abs"
+                self.params.abs_account_name = temp_creds.url.split("@")[1].split(".")[0]
+                self.params.abs_sas_token = temp_creds.azure_user_delegation_sas.sas_token
+
+            else:
+                raise UserException(
+                    "Unsupported provider for Unity Catalog: only Azure Blob Storage and AWS S3 are supported."
+                )
 
         match self.params.provider:
             case "abs":
@@ -130,9 +140,9 @@ class Component(ComponentBase):
                             TYPE S3,
                             REGION '{self.params.aws_region}',
                             KEY_ID '{self.params.aws_key_id}',
-                            SECRET '{self.params.aws_key_secret}'
+                            SECRET '{self.params.aws_key_secret}' %s
                             );
-                       """
+                       """ % (f",SESSION_TOKEN '{session_token}'" if session_token else "")
             case "gcs":
                 query = f"""
                         INSTALL httpfs;
@@ -276,7 +286,7 @@ class Component(ComponentBase):
     def list_uc_tables(self):
         w = WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
         tables = w.tables.list(self.params.source.catalog, self.params.source.schema_name)
-        return [SelectElement(value=t.table_id, label=t.name) for t in tables]
+        return [SelectElement(t.name) for t in tables]
 
     @sync_action("access_method_helper")
     def access_method_helper(self):
