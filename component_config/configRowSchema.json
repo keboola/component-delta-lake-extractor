@@ -8,23 +8,98 @@
     "debug"
   ],
   "properties": {
+    "helper_button": {
+      "type": "button",
+      "format": "sync-action",
+      "options": {
+        "async": {
+          "label": "Initialize configuration",
+          "action": "access_method_helper",
+          "autoload": []
+        }
+      },
+      "propertyOrder": 1
+    },
     "source": {
       "type": "object",
       "title": "Data source",
-      "required": [
-        "container_name",
-        "blob_name"
-      ],
+      "required": [],
       "properties": {
+        "helper_access_method": {
+          "type": "string",
+          "title": "Helper Access Method",
+          "options": {
+            "hidden": true
+          },
+          "propertyOrder": 20
+        },
         "container_name": {
           "type": "string",
           "title": "Container name",
+          "options": {
+            "dependencies": {
+              "helper_access_method": "direct_storage"
+            }
+          },
           "propertyOrder": 21
         },
         "blob_name": {
           "type": "string",
           "title": "Blob name",
+          "options": {
+            "dependencies": {
+              "helper_access_method": "direct_storage"
+            }
+          },
           "propertyOrder": 22
+        },
+        "catalog": {
+          "title": "Catalog",
+          "type": "string",
+          "format": "select",
+          "enum": [],
+          "options": {
+            "dependencies": {
+              "helper_access_method": "unity_catalog"
+            },
+            "async": {
+              "label": "Load catalogs",
+              "action": "list_uc_catalogs"
+            }
+          },
+          "propertyOrder": 23
+        },
+        "schema_name": {
+          "title": "Schema",
+          "type": "string",
+          "format": "select",
+          "enum": [],
+          "options": {
+            "dependencies": {
+              "helper_access_method": "unity_catalog"
+            },
+            "async": {
+              "label": "Load schemas",
+              "action": "list_uc_schemas"
+            }
+          },
+          "propertyOrder": 24
+        },
+        "table": {
+          "title": "Table",
+          "type": "string",
+          "format": "select",
+          "enum": [],
+          "options": {
+            "dependencies": {
+              "helper_access_method": "unity_catalog"
+            },
+            "async": {
+              "label": "Load tables",
+              "action": "list_uc_tables"
+            }
+          },
+          "propertyOrder": 25
         },
         "table_preview": {
           "type": "button",
@@ -187,7 +262,7 @@
           "type": "string",
           "title": "File name",
           "default": "",
-          "description": "(Optional) Specify the file name (without the filetype) if you leave this field empty, the default name container_blob will be used. The resulting file will be named `<table_name>.parquet`",
+          "description": "(Optional) Specify the file name (without the filetype) if you leave this field empty, the default name container-blob or catalog-schema-table will be used. The resulting file will be named `<table_name>.parquet`",
           "options": {
             "dependencies": {
               "parquet_output": true
