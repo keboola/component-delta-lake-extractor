@@ -8,18 +8,6 @@
     "debug"
   ],
   "properties": {
-    "helper_button": {
-      "type": "button",
-      "format": "sync-action",
-      "options": {
-        "async": {
-          "label": "Initialize configuration",
-          "action": "access_method_helper",
-          "autoload": []
-        }
-      },
-      "propertyOrder": 1
-    },
     "source": {
       "type": "object",
       "title": "Data source",
@@ -30,6 +18,10 @@
           "title": "Helper Access Method",
           "options": {
             "hidden": true
+          },
+          "template": "{{val}}",
+          "watch": {
+            "val": "_metadata_.root.parameters.access_method"
           },
           "propertyOrder": 20
         },

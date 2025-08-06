@@ -299,39 +299,6 @@ class Component(ComponentBase):
         tables = w.tables.list(self.params.source.catalog, self.params.source.schema_name)
         return [SelectElement(t.name) for t in tables]
 
-    @sync_action("access_method_helper")
-    def access_method_helper(self):
-        """
-        Method to return the access method to the config row, so we can render UI based on the selected method.
-        """
-        return {
-            "type": "data",
-            "data": {
-                "source": {
-                    "helper_access_method": self.params.access_method,
-                    "container_name": self.params.source.container_name,
-                    "blob_name": self.params.source.blob_name,
-                    "catalog": self.params.source.catalog,
-                    "schema_name": self.params.source.schema_name,
-                    "table": self.params.source.table,
-                },
-                "data_selection": {
-                    "mode": self.params.data_selection.mode,
-                    "columns": self.params.data_selection.columns,
-                    "query": self.params.data_selection.query,
-                },
-                "destination": {
-                    "preserve_insertion_order": self.params.destination.preserve_insertion_order,
-                    "parquet_output": self.params.destination.parquet_output,
-                    "file_name": self.params.destination.file_name,
-                    "table_name": self.params.destination.table_name,
-                    "load_type": self.params.destination.load_type,
-                    "primary_key": self.params.destination.primary_key,
-                },
-                "debug": self.params.debug,
-            },
-        }
-
 
 """
         Main entrypoint
