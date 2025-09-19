@@ -1,7 +1,7 @@
-Data Lake Tables
+Delta Tables Extractor
 =============
 
-Component supports 2 access modes:
+Component supports two access modes:
 
 ### 1. Direct Access to Delta Tables
 Direct access to delta tables in your blob storage. We currently support the following providers:
@@ -21,7 +21,22 @@ Currently we support only Azure Blob Storage backend.
 - **Permissions**: Grant EXTERNAL USE SCHEMA permission
   - Navigate to: Workspace > Permissions > Add external use schema
 
-In this mode, the user selects the catalog, schema, and table from the Unity Catalog interface.
+In this mode, the user selects the catalog, schema, and table in the configuration row.
+
+
+### Data selection options
+The component supports the following data selection options:
+- **All Data**: Select all columns and rows from the table.
+- **Select Columns**: Select specific columns from the table.
+- **Custom Query**: Write a custom SQL query to select specific data from the table.
+
+### Data Destination Options
+- **Store result as Parquet:** If enabled, the extractor will save the result as a Parquet file in file storage instead of a table in Keboola storage bucket.
+- **Load Type:** In Full Load mode, the destination table is overwritten on each run. In Incremental Load mode, data is upserted into the destination table based on the primary key. Append mode does not use primary keys and does not deduplicate data.
+- **Primary Key [optional]:** List of primary key columns for incremental loads. If not specified, incremental mode works as append mode.
+- **Preserve Insertion Order:** Disabling this option may help prevent out-of-memory issues.
+- **File Name:** Name of the output file. If left empty, a name is generated as bucket.table_name or catalog.schema.table_name when using Unity Catalog.
+- **Table Name:** Name of the source table. If left empty, a name is generated as bucket.table_name or catalog.schema.table_name when using Unity Catalog.
 
 
 Development
