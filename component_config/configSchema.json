@@ -89,6 +89,23 @@
         }
       }
     },
+    "warehouse_id": {
+      "type": "string",
+      "title": "SQL Warehouse",
+      "format": "select",
+      "enum": [],
+      "description": "Databricks SQL warehouse used to run the 'Databricks SQL query' mode (required only for that mode).",
+      "propertyOrder": 8,
+      "options": {
+        "dependencies": {
+          "access_method": "unity_catalog"
+        },
+        "async": {
+          "label": "Load warehouses",
+          "action": "list_warehouses"
+        }
+      }
+    },
     "provider": {
       "enum": [
         "s3",

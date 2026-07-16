@@ -118,7 +118,8 @@
           "enum": [
             "all_data",
             "select_columns",
-            "custom_query"
+            "custom_query",
+            "workspace_query"
           ],
           "type": "string",
           "title": "Load Type",
@@ -127,7 +128,8 @@
             "enum_titles": [
               "All Data",
               "Select Columns",
-              "Custom Query"
+              "Custom Query",
+              "Databricks SQL Query (multi-table)"
             ]
           },
           "propertyOrder": 31
@@ -135,12 +137,15 @@
         "query": {
           "type": "string",
           "title": "Query",
-          "description": "The SQL query that will be used to extract data. Use the placeholder in_table to reference the input table in your query. For example: `SELECT * FROM in_table WHERE is_active = true`",
+          "description": "The SQL query used to extract data. In 'Custom Query' mode use the placeholder `in_table` to reference the source table (e.g. `SELECT * FROM in_table WHERE is_active = true`). In 'Databricks SQL Query' mode write standard SQL referencing full `catalog.schema.table` names; it runs on the selected SQL Warehouse and may join multiple tables.",
           "propertyOrder": 32,
           "options": {
             "tooltip": "For query preview, a LIMIT 10 is automatically added to ensure completion within the 30-second time limit for sync actions. When the query is run as a job, it is executed without any modifications.",
             "dependencies": {
-              "mode": "custom_query"
+              "mode": [
+                "custom_query",
+                "workspace_query"
+              ]
             }
           }
         },
@@ -154,6 +159,20 @@
             },
             "dependencies": {
               "mode": "custom_query"
+            }
+          },
+          "propertyOrder": 33
+        },
+        "workspace_query_preview": {
+          "type": "button",
+          "format": "sync-action",
+          "options": {
+            "async": {
+              "label": "Query preview",
+              "action": "workspace_query_preview"
+            },
+            "dependencies": {
+              "mode": "workspace_query"
             }
           },
           "propertyOrder": 33

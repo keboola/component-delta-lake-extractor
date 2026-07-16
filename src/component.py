@@ -1,20 +1,30 @@
+import io
 import logging
 import os
 import time
 from collections import OrderedDict
 
+import requests
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.catalog import TableOperation
+from databricks.sdk.service.sql import (
+    Disposition,
+    ExecuteStatementRequestOnWaitTimeout,
+    Format,
+    StatementState,
+)
 import databricks.sdk.errors as dbx_errors
 import duckdb
 import polars
+import pyarrow as pa
+import pyarrow.parquet as pq
 from duckdb.duckdb import DuckDBPyConnection
 from keboola.component.base import ComponentBase, sync_action
 from keboola.component.dao import SupportedDataTypes, BaseType, ColumnDefinition
 from keboola.component.exceptions import UserException
 from keboola.component.sync_actions import SelectElement, ValidationResult, MessageType
 
-from configuration import Configuration, AccessMethod, AuthType
+from configuration import Configuration, AccessMethod, DataSelectionMode, AuthType
 
 DUCK_DB_DIR = os.path.join(os.environ.get("TMPDIR", "/tmp"), "duckdb")
 
@@ -24,9 +34,13 @@ class Component(ComponentBase):
         super().__init__()
         self.params = Configuration(**self.configuration.parameters)
         self._connection = None
+        self._workspace_result_glob = None
         self.source_uri = self.build_source_uri()
 
     def run(self):
+        if self.params.data_selection.mode == DataSelectionMode.workspace_query:
+            self._workspace_result_glob = self._execute_workspace_query(self.params.data_selection.query)
+
         self._connection = self.init_connection()
         table_name = self.get_table_name()
         query = self.get_query()
@@ -79,7 +93,10 @@ class Component(ComponentBase):
         )
         conn = duckdb.connect(config=config)
 
-        conn.execute(self.build_connection_query())
+        # In workspace_query mode the query is executed on the Databricks warehouse and only the staged
+        # result parquet is read locally, so no cloud storage secret is needed.
+        if self.params.data_selection.mode != DataSelectionMode.workspace_query:
+            conn.execute(self.build_connection_query())
 
         if not self.params.destination.preserve_insertion_order:
             conn.execute("SET preserve_insertion_order = false;").fetchall()
@@ -98,6 +115,71 @@ class Component(ComponentBase):
                 client_secret=self.params.unity_catalog_client_secret,
             )
         return WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+
+    def _execute_workspace_query(self, query: str, row_limit: int = None) -> str:
+        """
+        Executes a SQL query on a Databricks SQL warehouse (Statement Execution API) and stages the
+        result locally as parquet files using Cloud Fetch (EXTERNAL_LINKS + ARROW_STREAM).
+
+        Returns a glob path of the staged parquet files, suitable for DuckDB `read_parquet`.
+        """
+        if not self.params.warehouse_id:
+            raise UserException("A SQL Warehouse must be selected to run a Databricks SQL query.")
+        if not query:
+            raise UserException("The query must not be empty.")
+
+        w = self._get_workspace_client()
+
+        try:
+            resp = w.statement_execution.execute_statement(
+                warehouse_id=self.params.warehouse_id,
+                statement=query,
+                disposition=Disposition.EXTERNAL_LINKS,
+                format=Format.ARROW_STREAM,
+                wait_timeout="30s",
+                on_wait_timeout=ExecuteStatementRequestOnWaitTimeout.CONTINUE,
+                row_limit=row_limit,
+            )
+
+            statement_id = resp.statement_id
+            while resp.status and resp.status.state in (StatementState.PENDING, StatementState.RUNNING):
+                time.sleep(2)
+                resp = w.statement_execution.get_statement(statement_id)
+
+            if not resp.status or resp.status.state != StatementState.SUCCEEDED:
+                error = resp.status.error.message if resp.status and resp.status.error else "unknown error"
+                raise UserException(f"Databricks query failed: {error}")
+        except dbx_errors.platform.DatabricksError as e:
+            raise UserException(f"Databricks query failed: {str(e)}")
+
+        result_dir = os.path.join(DUCK_DB_DIR, "dbx_result")
+        os.makedirs(result_dir, exist_ok=True)
+
+        chunk_index = 0
+        result = resp.result
+        while result is not None:
+            for link in result.external_links or []:
+                # Presigned URL - fetched WITHOUT an Authorization header, but any headers the link
+                # requires (e.g. Azure blob headers) must be forwarded as-is.
+                r = requests.get(link.external_link, headers=link.http_headers or {})
+                r.raise_for_status()
+                table = pa.ipc.open_stream(io.BytesIO(r.content)).read_all()
+                pq.write_table(table, os.path.join(result_dir, f"chunk_{chunk_index}.parquet"))
+                chunk_index += 1
+
+            next_index = result.next_chunk_index
+            if next_index is None:
+                break
+            result = w.statement_execution.get_statement_result_chunk_n(statement_id, next_index)
+
+        if chunk_index == 0:
+            # Empty result: build an empty parquet from the result schema so the output table still has
+            # the correct columns and an (empty) manifest is written downstream.
+            columns = resp.manifest.schema.columns if resp.manifest and resp.manifest.schema else []
+            empty = pa.table({c.name: pa.array([], type=pa.string()) for c in columns})
+            pq.write_table(empty, os.path.join(result_dir, "chunk_0.parquet"))
+
+        return os.path.join(result_dir, "*.parquet")
 
     def _get_temp_credentials(self, w: WorkspaceClient):
         try:
@@ -199,10 +281,14 @@ class Component(ComponentBase):
             table_name = "-".join(filter(None, parts))
         else:
             table_name = self.params.destination.table_name or self.params.destination.file_name
-        return table_name
+        # workspace_query has no source table to derive a name from; fall back to a generic name.
+        return table_name or "query_result"
 
     def get_query(self):
-        if self.params.data_selection.mode == "custom_query":
+        if self.params.data_selection.mode == "workspace_query":
+            # The user's SQL already ran on the warehouse; here we only read the staged result.
+            query = f"SELECT * FROM read_parquet('{self._workspace_result_glob}')"
+        elif self.params.data_selection.mode == "custom_query":
             query = self.params.data_selection.query.lower().replace(
                 "from in_table ", f"FROM delta_scan('{self.source_uri}')"
             )
@@ -311,6 +397,18 @@ class Component(ComponentBase):
         w = self._get_workspace_client()
         tables = w.tables.list(self.params.source.catalog, self.params.source.schema_name)
         return [SelectElement(t.name) for t in tables]
+
+    @sync_action("list_warehouses")
+    def list_warehouses(self):
+        w = self._get_workspace_client()
+        return [SelectElement(wh.id, wh.name) for wh in w.warehouses.list()]
+
+    @sync_action("workspace_query_preview")
+    def workspace_query_preview(self):
+        result_glob = self._execute_workspace_query(self.params.data_selection.query, row_limit=10)
+        self._connection = self.init_connection()
+        out = self._connection.execute(f"SELECT * FROM read_parquet('{result_glob}')").pl()
+        return ValidationResult(self.to_markdown(out), MessageType.SUCCESS)
 
 
 """

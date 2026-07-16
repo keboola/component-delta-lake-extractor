@@ -27,6 +27,10 @@ Currently we support only Azure Blob Storage backend.
 
 In this mode, the user selects the catalog, schema, and table in the configuration row.
 
+**Databricks SQL query (joining multiple tables):** In addition to selecting a single table, Unity Catalog access supports a *Databricks SQL Query* data-selection mode. The SQL runs on a **Databricks SQL warehouse** (so it can join multiple tables by their full `catalog.schema.table` names), and the result is streamed back efficiently via Cloud Fetch. This requires:
+- Selecting a **SQL Warehouse** in the authorization configuration.
+- Granting the principal (PAT user or service principal) **CAN USE** on the warehouse and `SELECT` on every table referenced in the query.
+
 
 ### Data selection options
 The component supports the following data selection options:
