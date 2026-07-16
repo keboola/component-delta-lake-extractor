@@ -28,7 +28,7 @@ Currently we support only Azure Blob Storage backend.
 In this mode, the user selects the catalog, schema, and table in the configuration row.
 
 **Databricks SQL query (joining multiple tables):** In addition to selecting a single table, Unity Catalog access supports a *Databricks SQL Query* data-selection mode. The SQL runs on a **Databricks SQL warehouse** (so it can join multiple tables by their full `catalog.schema.table` names), and the result is streamed back efficiently via Cloud Fetch. This requires:
-- Selecting a **SQL Warehouse** in the authorization configuration.
+- Selecting a **SQL Warehouse** per configuration row (in the row's data selection), so different queries can run on different warehouses (e.g. small vs large).
 - Granting the principal (PAT user or service principal) **CAN USE** on the warehouse and `SELECT` on every table referenced in the query.
 
 
@@ -36,7 +36,8 @@ In this mode, the user selects the catalog, schema, and table in the configurati
 The component supports the following data selection options:
 - **All Data**: Select all columns and rows from the table.
 - **Select Columns**: Select specific columns from the table.
-- **Custom Query**: Write a custom SQL query to select specific data from the table.
+- **Custom Query**: Write a custom SQL query, executed client-side in DuckDB over a single table. Reference the source table with the `in_table` placeholder.
+- **Databricks SQL Query**: Write standard SQL executed on a Databricks SQL warehouse, referencing full `catalog.schema.table` names. Supports joining multiple tables (Unity Catalog access only).
 ### Data Destination Options
 - **Store as Parquet:** If enabled, the extractor saves the result as a Parquet file in file storage instead of a table in the Keboola storage bucket.
 - **Load Type:** In Full Load mode, the destination table is overwritten on each run. In Incremental Load mode, data is upserted into the destination table based on the primary key. Append mode does not use primary keys and does not deduplicate data.
