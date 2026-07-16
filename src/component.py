@@ -14,7 +14,7 @@ from keboola.component.dao import SupportedDataTypes, BaseType, ColumnDefinition
 from keboola.component.exceptions import UserException
 from keboola.component.sync_actions import SelectElement, ValidationResult, MessageType
 
-from configuration import Configuration, AccessMethod
+from configuration import Configuration, AccessMethod, AuthType
 
 DUCK_DB_DIR = os.path.join(os.environ.get("TMPDIR", "/tmp"), "duckdb")
 
@@ -86,6 +86,19 @@ class Component(ComponentBase):
 
         return conn
 
+    def _get_workspace_client(self) -> WorkspaceClient:
+        """
+        Returns a Databricks WorkspaceClient authenticated either with a personal access token (PAT)
+        or with service principal (OAuth M2M) credentials, depending on the selected auth type.
+        """
+        if self.params.auth_type == AuthType.service_principal:
+            return WorkspaceClient(
+                host=self.params.unity_catalog_url,
+                client_id=self.params.unity_catalog_client_id,
+                client_secret=self.params.unity_catalog_client_secret,
+            )
+        return WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+
     def _get_temp_credentials(self, w: WorkspaceClient):
         try:
             src = self.params.source
@@ -101,7 +114,7 @@ class Component(ComponentBase):
     def build_connection_query(self):
         session_token = None
         if self.params.access_method == AccessMethod.unity_catalog:
-            w = WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+            w = self._get_workspace_client()
 
             temp_creds = self._get_temp_credentials(w)
             self.source_uri = temp_creds.url
@@ -283,19 +296,19 @@ class Component(ComponentBase):
 
     @sync_action("list_uc_catalogs")
     def list_uc_catalogs(self):
-        w = WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+        w = self._get_workspace_client()
         catalogs = w.catalogs.list()
         return [SelectElement(c.name) for c in catalogs]
 
     @sync_action("list_uc_schemas")
     def list_uc_schemas(self):
-        w = WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+        w = self._get_workspace_client()
         schemas = w.schemas.list(self.params.source.catalog)
         return [SelectElement(s.name) for s in schemas]
 
     @sync_action("list_uc_tables")
     def list_uc_tables(self):
-        w = WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+        w = self._get_workspace_client()
         tables = w.tables.list(self.params.source.catalog, self.params.source.schema_name)
         return [SelectElement(t.name) for t in tables]
 

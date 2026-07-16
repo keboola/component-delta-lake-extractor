@@ -15,11 +15,15 @@ In this mode, the Delta Table path is defined by specifying the bucket/container
 ### 2. Unity Catalog
 Currently we support only Azure Blob Storage backend.
 
+**Authentication:** Two options are supported:
+- **Personal Access Token (PAT)**: [How to get access token in Databricks](https://docs.databricks.com/aws/en/dev-tools/auth/pat#databricks-personal-access-tokens-for-workspace-users)
+- **Service Principal (OAuth M2M)**: use a machine-to-machine identity instead of a personal token. Create it in *Settings > Identity and access > Service principals > Add service principal*, then generate an OAuth secret and use the resulting **Client ID** and **Client Secret**. When creating the secret, grant the **Databricks SQL access** and **Workspace access** scopes.
+
 **Setup Requirements:**
-- **Access Token**: [How to get access token in Databricks](https://docs.databricks.com/aws/en/dev-tools/auth/pat#databricks-personal-access-tokens-for-workspace-users)
 - **External Data Access**: [Enable external data access on the metastore](https://docs.databricks.com/aws/en/external-access/admin#enable-external-data-access-on-the-metastore)
 - **Permissions**: Grant EXTERNAL USE SCHEMA permission
   - Navigate to: Workspace > Permissions > Add external use schema
+  - When using a service principal, also grant it `USE SCHEMA` and `SELECT` on the schema you want to read.
 
 In this mode, the user selects the catalog, schema, and table in the configuration row.
 
