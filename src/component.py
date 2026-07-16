@@ -56,7 +56,7 @@ class Component(ComponentBase):
         else:
             table_meta = self._connection.execute(f"""DESCRIBE {query};""").fetchall()
             schema = OrderedDict(
-                {c[0]: ColumnDefinition(data_types=BaseType(dtype=self.convert_base_types(c[1]))) for c in table_meta}
+                {c[0]: ColumnDefinition(data_types=self.to_base_type(c[1])) for c in table_meta}
             )
 
             out_table = self.create_out_table_definition(
@@ -303,8 +303,24 @@ class Component(ComponentBase):
 
         return query
 
-    def convert_base_types(self, dtype: str) -> SupportedDataTypes:
-        if dtype in [
+    @staticmethod
+    def to_base_type(dtype: str) -> BaseType:
+        """
+        Converts a DuckDB DESCRIBE type string (e.g. "DECIMAL(10,0)", "VARCHAR(255)") into a Keboola
+        BaseType, preserving the precision/scale or length where it is meaningful.
+        """
+        base_type = Component.convert_base_types(dtype)
+        length = None
+        if base_type in (SupportedDataTypes.NUMERIC, SupportedDataTypes.STRING) and "(" in dtype:
+            length = dtype[dtype.index("(") + 1:dtype.rindex(")")].replace(" ", "")
+        return BaseType(dtype=base_type, length=length)
+
+    @staticmethod
+    def convert_base_types(dtype: str) -> SupportedDataTypes:
+        # DuckDB DESCRIBE returns parametrized types (e.g. "DECIMAL(10,0)"); strip the precision/scale
+        # suffix so the base type matches.
+        base_type = dtype.split("(")[0].strip().upper()
+        if base_type in [
             "TINYINT",
             "SMALLINT",
             "INTEGER",
@@ -317,15 +333,15 @@ class Component(ComponentBase):
             "UHUGEINT",
         ]:
             return SupportedDataTypes.INTEGER
-        elif dtype in ["REAL", "DECIMAL"]:
+        elif base_type in ["DECIMAL", "NUMERIC"]:
             return SupportedDataTypes.NUMERIC
-        elif dtype == "DOUBLE":
+        elif base_type in ["REAL", "FLOAT", "DOUBLE"]:
             return SupportedDataTypes.FLOAT
-        elif dtype == "BOOLEAN":
+        elif base_type == "BOOLEAN":
             return SupportedDataTypes.BOOLEAN
-        elif dtype in ["TIMESTAMP", "TIMESTAMP WITH TIME ZONE"]:
+        elif base_type in ["TIMESTAMP", "TIMESTAMP WITH TIME ZONE"]:
             return SupportedDataTypes.TIMESTAMP
-        elif dtype == "DATE":
+        elif base_type == "DATE":
             return SupportedDataTypes.DATE
         else:
             return SupportedDataTypes.STRING
