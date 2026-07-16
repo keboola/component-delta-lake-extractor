@@ -139,7 +139,9 @@ class TestComponent(unittest.TestCase):
             comp._execute_workspace_query("SELECT 1")
 
     def test_execute_workspace_query_requires_query(self):
-        comp = make_component(warehouse_id="wh1")
+        comp = make_component(
+            data_selection={"mode": "workspace_query", "query": "SELECT 1", "warehouse_id": "wh1"}
+        )
         with self.assertRaises(UserException):
             comp._execute_workspace_query("")
 
@@ -148,7 +150,9 @@ class TestComponent(unittest.TestCase):
     @mock.patch("component.requests")
     @mock.patch("component.os.makedirs")
     def test_execute_workspace_query_success_multichunk(self, _md, req, _pa, pq):
-        comp = make_component(warehouse_id="wh1")
+        comp = make_component(
+            data_selection={"mode": "workspace_query", "query": "SELECT 1", "warehouse_id": "wh1"}
+        )
         req.get.return_value.content = b""
         w = mock.MagicMock()
         comp._get_workspace_client = lambda: w
@@ -173,7 +177,9 @@ class TestComponent(unittest.TestCase):
     @mock.patch("component.time.sleep")
     @mock.patch("component.os.makedirs")
     def test_execute_workspace_query_polls_until_succeeded(self, _md, sleep, req, _pa, pq):
-        comp = make_component(warehouse_id="wh1")
+        comp = make_component(
+            data_selection={"mode": "workspace_query", "query": "SELECT 1", "warehouse_id": "wh1"}
+        )
         req.get.return_value.content = b""
         w = mock.MagicMock()
         comp._get_workspace_client = lambda: w
@@ -191,7 +197,9 @@ class TestComponent(unittest.TestCase):
 
     @mock.patch("component.os.makedirs")
     def test_execute_workspace_query_failed_state_raises(self, _md):
-        comp = make_component(warehouse_id="wh1")
+        comp = make_component(
+            data_selection={"mode": "workspace_query", "query": "SELECT 1", "warehouse_id": "wh1"}
+        )
         w = mock.MagicMock()
         comp._get_workspace_client = lambda: w
         w.statement_execution.execute_statement.return_value = fake_response(
@@ -206,7 +214,9 @@ class TestComponent(unittest.TestCase):
     @mock.patch("component.requests")
     @mock.patch("component.os.makedirs")
     def test_execute_workspace_query_empty_result_writes_empty_parquet(self, _md, req, _pa, pq):
-        comp = make_component(warehouse_id="wh1")
+        comp = make_component(
+            data_selection={"mode": "workspace_query", "query": "SELECT 1", "warehouse_id": "wh1"}
+        )
         w = mock.MagicMock()
         comp._get_workspace_client = lambda: w
         w.statement_execution.execute_statement.return_value = fake_response(

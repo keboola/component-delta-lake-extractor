@@ -163,6 +163,23 @@
           },
           "propertyOrder": 33
         },
+        "warehouse_id": {
+          "type": "string",
+          "title": "SQL Warehouse",
+          "format": "select",
+          "enum": [],
+          "description": "Databricks SQL warehouse used to run this query. Different rows may use different warehouses (e.g. small vs large).",
+          "propertyOrder": 33,
+          "options": {
+            "async": {
+              "label": "Load warehouses",
+              "action": "list_warehouses"
+            },
+            "dependencies": {
+              "mode": "workspace_query"
+            }
+          }
+        },
         "workspace_query_preview": {
           "type": "button",
           "format": "sync-action",
@@ -175,7 +192,7 @@
               "mode": "workspace_query"
             }
           },
-          "propertyOrder": 33
+          "propertyOrder": 34
         },
         "columns": {
           "type": "array",

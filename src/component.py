@@ -123,7 +123,8 @@ class Component(ComponentBase):
 
         Returns a glob path of the staged parquet files, suitable for DuckDB `read_parquet`.
         """
-        if not self.params.warehouse_id:
+        warehouse_id = self.params.data_selection.warehouse_id
+        if not warehouse_id:
             raise UserException("A SQL Warehouse must be selected to run a Databricks SQL query.")
         if not query:
             raise UserException("The query must not be empty.")
@@ -132,7 +133,7 @@ class Component(ComponentBase):
 
         try:
             resp = w.statement_execution.execute_statement(
-                warehouse_id=self.params.warehouse_id,
+                warehouse_id=warehouse_id,
                 statement=query,
                 disposition=Disposition.EXTERNAL_LINKS,
                 format=Format.ARROW_STREAM,

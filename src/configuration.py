@@ -38,6 +38,7 @@ class DataSelection(BaseModel):
     mode: DataSelectionMode = Field(default=DataSelectionMode.all_data)
     columns: list[str] = Field(default_factory=list)
     query: str = ""
+    warehouse_id: str = ""
 
 
 class Destination(BaseModel):
@@ -62,7 +63,6 @@ class Configuration(BaseModel):
     unity_catalog_token: str = Field(alias="#unity_catalog_token", default=None)
     unity_catalog_client_id: str = None
     unity_catalog_client_secret: str = Field(alias="#unity_catalog_client_secret", default=None)
-    warehouse_id: str = None
     abs_account_name: str = None
     abs_sas_token: str = Field(alias="#abs_sas_token", default=None)
     aws_region: str = None
