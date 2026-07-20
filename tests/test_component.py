@@ -73,6 +73,11 @@ class TestComponent(unittest.TestCase):
             "TIMESTAMP WITH TIME ZONE": SupportedDataTypes.TIMESTAMP,
             "DATE": SupportedDataTypes.DATE,
             "VARCHAR": SupportedDataTypes.STRING,
+            # nested / complex types have no scalar equivalent -> STRING
+            "INTEGER[]": SupportedDataTypes.STRING,
+            "DECIMAL(10,2)[]": SupportedDataTypes.STRING,
+            "STRUCT(a INTEGER, b VARCHAR)": SupportedDataTypes.STRING,
+            "MAP(VARCHAR, INTEGER)": SupportedDataTypes.STRING,
         }
         for dtype, expected in cases.items():
             self.assertEqual(Component.convert_base_types(dtype), expected, msg=dtype)
@@ -85,6 +90,11 @@ class TestComponent(unittest.TestCase):
             "BIGINT": (SupportedDataTypes.INTEGER, None),
             "DOUBLE": (SupportedDataTypes.FLOAT, None),
             "DATE": (SupportedDataTypes.DATE, None),
+            # complex types -> STRING with NO length (no garbage from the inner parens)
+            "DECIMAL(10,2)[]": (SupportedDataTypes.STRING, None),
+            "INTEGER[]": (SupportedDataTypes.STRING, None),
+            "STRUCT(a INTEGER, b VARCHAR)": (SupportedDataTypes.STRING, None),
+            "MAP(VARCHAR, INTEGER)": (SupportedDataTypes.STRING, None),
         }
         for dtype, (expected_base, expected_len) in cases.items():
             bt = Component.to_base_type(dtype)["base"]
@@ -193,7 +203,47 @@ class TestComponent(unittest.TestCase):
         with mock.patch("component.requests.get", side_effect=requests.ConnectionError("boom")):
             with self.assertRaises(UserException) as ctx:
                 comp._execute_workspace_query("SELECT 1")
-        self.assertIn("Failed to fetch query result", str(ctx.exception))
+        msg = str(ctx.exception)
+        self.assertIn("Failed to download query result", msg)
+        self.assertIn("ConnectionError", msg)
+        self.assertNotIn("boom", msg)  # raw exception text must not leak
+
+    def test_execute_workspace_query_download_error_does_not_leak_sas_url(self):
+        import requests
+
+        comp = make_component(
+            data_selection={"mode": "workspace_query", "query": "SELECT 1", "warehouse_id": "wh1"}
+        )
+        w = mock.MagicMock()
+        comp._get_workspace_client = lambda: w
+        secret_url = "https://acct.blob.core.windows.net/x?sig=SECRETSAS&se=2026"
+        w.statement_execution.execute_statement.return_value = fake_response(
+            StatementState.SUCCEEDED, external_links=[fake_link(url=secret_url)], next_chunk_index=None
+        )
+        http_err = requests.HTTPError(
+            f"403 Client Error: Forbidden for url: {secret_url}", response=mock.MagicMock(status_code=403)
+        )
+        with mock.patch("component.requests.get", side_effect=http_err):
+            with self.assertRaises(UserException) as ctx:
+                comp._execute_workspace_query("SELECT 1")
+        msg = str(ctx.exception)
+        self.assertNotIn("SECRETSAS", msg)
+        self.assertNotIn("sig=", msg)
+        self.assertIn("HTTP 403", msg)
+
+    @mock.patch("component.time.sleep")
+    def test_execute_workspace_query_poll_timeout_cancels(self, _sleep):
+        comp = make_component(
+            data_selection={"mode": "workspace_query", "query": "SELECT 1", "warehouse_id": "wh1"}
+        )
+        w = mock.MagicMock()
+        comp._get_workspace_client = lambda: w
+        w.statement_execution.execute_statement.return_value = fake_response(StatementState.RUNNING)
+        w.statement_execution.get_statement.return_value = fake_response(StatementState.RUNNING)
+        with self.assertRaises(UserException) as ctx:
+            comp._execute_workspace_query("SELECT 1", poll_timeout=0)
+        w.statement_execution.cancel_execution.assert_called_once_with("stmt-1")
+        self.assertIn("cancelled", str(ctx.exception))
 
     @mock.patch("component.pq")
     @mock.patch("component.pa")

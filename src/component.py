@@ -31,6 +31,11 @@ DUCK_DB_DIR = os.path.join(os.environ.get("TMPDIR", "/tmp"), "duckdb")
 # (connect, read) timeout for Cloud Fetch presigned-link downloads, in seconds.
 CLOUD_FETCH_TIMEOUT = (10, 300)
 
+# Max seconds to poll a running Databricks statement before cancelling it.
+# The preview sync action uses a short deadline to stay responsive; a full run allows longer.
+STATEMENT_POLL_TIMEOUT = 1200
+PREVIEW_POLL_TIMEOUT = 25
+
 
 class Component(ComponentBase):
     def __init__(self):
@@ -119,7 +124,9 @@ class Component(ComponentBase):
             )
         return WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
 
-    def _execute_workspace_query(self, query: str, row_limit: int = None) -> str:
+    def _execute_workspace_query(
+        self, query: str, row_limit: int = None, poll_timeout: int = STATEMENT_POLL_TIMEOUT
+    ) -> str:
         """
         Executes a SQL query on a Databricks SQL warehouse (Statement Execution API) and stages the
         result locally as parquet files using Cloud Fetch (EXTERNAL_LINKS + ARROW_STREAM).
@@ -146,7 +153,15 @@ class Component(ComponentBase):
             )
 
             statement_id = resp.statement_id
+            deadline = time.time() + poll_timeout
             while resp.status and resp.status.state in (StatementState.PENDING, StatementState.RUNNING):
+                if time.time() > deadline:
+                    # Cancel so a hung/cold warehouse stops billing instead of running to the job timeout.
+                    self._cancel_statement(w, statement_id)
+                    raise UserException(
+                        f"Databricks query did not finish within {poll_timeout}s and was cancelled. "
+                        "Try a larger warehouse or a simpler query."
+                    )
                 time.sleep(2)
                 resp = w.statement_execution.get_statement(statement_id)
 
@@ -178,7 +193,15 @@ class Component(ComponentBase):
                 if next_index is None:
                     break
                 result = w.statement_execution.get_statement_result_chunk_n(statement_id, next_index)
-        except (requests.RequestException, dbx_errors.platform.DatabricksError) as e:
+        except requests.RequestException as e:
+            # Never surface str(e): for an HTTP error it embeds the presigned URL incl. the Azure SAS
+            # signature. Suppress the cause too (`from None`) so it can't leak via the logged traceback.
+            detail = type(e).__name__
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status is not None:
+                detail = f"{detail} (HTTP {status})"
+            raise UserException(f"Failed to download query result from Databricks ({detail}).") from None
+        except dbx_errors.platform.DatabricksError as e:
             raise UserException(f"Failed to fetch query result from Databricks: {str(e)}") from e
 
         if chunk_index == 0:
@@ -189,6 +212,13 @@ class Component(ComponentBase):
             pq.write_table(empty, os.path.join(result_dir, "chunk_0.parquet"))
 
         return os.path.join(result_dir, "*.parquet")
+
+    @staticmethod
+    def _cancel_statement(w: WorkspaceClient, statement_id: str):
+        try:
+            w.statement_execution.cancel_execution(statement_id)
+        except dbx_errors.platform.DatabricksError:
+            logging.warning("Failed to cancel Databricks statement %s", statement_id)
 
     @staticmethod
     def _arrow_type_from_column(column) -> "pa.DataType":
@@ -332,22 +362,43 @@ class Component(ComponentBase):
         return query
 
     @staticmethod
+    def _is_complex_duckdb_type(normalized_dtype: str) -> bool:
+        """
+        True for DuckDB nested/complex types that have no scalar Keboola equivalent:
+        arrays/lists (end with "[]", e.g. `INTEGER[]`, `DECIMAL(10,2)[]`) and STRUCT/MAP/LIST/UNION.
+        """
+        return normalized_dtype.endswith("]") or normalized_dtype.split("(")[0].strip() in (
+            "STRUCT",
+            "MAP",
+            "LIST",
+            "UNION",
+        )
+
+    @staticmethod
     def to_base_type(dtype: str) -> BaseType:
         """
         Converts a DuckDB DESCRIBE type string (e.g. "DECIMAL(10,0)", "VARCHAR(255)") into a Keboola
-        BaseType, preserving the precision/scale or length where it is meaningful.
+        BaseType, preserving the precision/scale or length only for genuine scalar types. Complex
+        types (arrays/struct/map) map to STRING with no length.
         """
         base_type = Component.convert_base_types(dtype)
+        normalized = dtype.strip().upper()
+        base_name = normalized.split("(")[0].strip()
         length = None
-        if base_type in (SupportedDataTypes.NUMERIC, SupportedDataTypes.STRING) and "(" in dtype:
-            length = dtype[dtype.index("(") + 1:dtype.rindex(")")].replace(" ", "")
+        if not Component._is_complex_duckdb_type(normalized) and "(" in dtype:
+            if base_type == SupportedDataTypes.NUMERIC or base_name in ("VARCHAR", "CHAR", "BPCHAR"):
+                length = dtype[dtype.index("(") + 1:dtype.rindex(")")].replace(" ", "")
         return BaseType(dtype=base_type, length=length)
 
     @staticmethod
     def convert_base_types(dtype: str) -> SupportedDataTypes:
+        normalized = dtype.strip().upper()
+        # Nested/complex types (arrays, STRUCT/MAP/LIST/UNION) are serialized as text -> STRING.
+        if Component._is_complex_duckdb_type(normalized):
+            return SupportedDataTypes.STRING
         # DuckDB DESCRIBE returns parametrized types (e.g. "DECIMAL(10,0)"); strip the precision/scale
         # suffix so the base type matches.
-        base_type = dtype.split("(")[0].strip().upper()
+        base_type = normalized.split("(")[0].strip()
         if base_type in [
             "TINYINT",
             "SMALLINT",
@@ -449,7 +500,9 @@ class Component(ComponentBase):
 
     @sync_action("workspace_query_preview")
     def workspace_query_preview(self):
-        result_glob = self._execute_workspace_query(self.params.data_selection.query, row_limit=10)
+        result_glob = self._execute_workspace_query(
+            self.params.data_selection.query, row_limit=10, poll_timeout=PREVIEW_POLL_TIMEOUT
+        )
         self._connection = self.init_connection()
         out = self._connection.execute(f"SELECT * FROM read_parquet('{result_glob}')").pl()
         return ValidationResult(self.to_markdown(out), MessageType.SUCCESS)
