@@ -28,6 +28,9 @@ from configuration import Configuration, AccessMethod, DataSelectionMode, AuthTy
 
 DUCK_DB_DIR = os.path.join(os.environ.get("TMPDIR", "/tmp"), "duckdb")
 
+# (connect, read) timeout for Cloud Fetch presigned-link downloads, in seconds.
+CLOUD_FETCH_TIMEOUT = (10, 300)
+
 
 class Component(ComponentBase):
     def __init__(self):
@@ -151,36 +154,59 @@ class Component(ComponentBase):
                 error = resp.status.error.message if resp.status and resp.status.error else "unknown error"
                 raise UserException(f"Databricks query failed: {error}")
         except dbx_errors.platform.DatabricksError as e:
-            raise UserException(f"Databricks query failed: {str(e)}")
+            raise UserException(f"Databricks query failed: {str(e)}") from e
 
         result_dir = os.path.join(DUCK_DB_DIR, "dbx_result")
         os.makedirs(result_dir, exist_ok=True)
 
         chunk_index = 0
         result = resp.result
-        while result is not None:
-            for link in result.external_links or []:
-                # Presigned URL - fetched WITHOUT an Authorization header, but any headers the link
-                # requires (e.g. Azure blob headers) must be forwarded as-is.
-                r = requests.get(link.external_link, headers=link.http_headers or {})
-                r.raise_for_status()
-                table = pa.ipc.open_stream(io.BytesIO(r.content)).read_all()
-                pq.write_table(table, os.path.join(result_dir, f"chunk_{chunk_index}.parquet"))
-                chunk_index += 1
+        try:
+            while result is not None:
+                for link in result.external_links or []:
+                    # Presigned URL - fetched WITHOUT an Authorization header, but any headers the link
+                    # requires (e.g. Azure blob headers) must be forwarded as-is.
+                    r = requests.get(
+                        link.external_link, headers=link.http_headers or {}, timeout=CLOUD_FETCH_TIMEOUT
+                    )
+                    r.raise_for_status()
+                    table = pa.ipc.open_stream(io.BytesIO(r.content)).read_all()
+                    pq.write_table(table, os.path.join(result_dir, f"chunk_{chunk_index}.parquet"))
+                    chunk_index += 1
 
-            next_index = result.next_chunk_index
-            if next_index is None:
-                break
-            result = w.statement_execution.get_statement_result_chunk_n(statement_id, next_index)
+                next_index = result.next_chunk_index
+                if next_index is None:
+                    break
+                result = w.statement_execution.get_statement_result_chunk_n(statement_id, next_index)
+        except (requests.RequestException, dbx_errors.platform.DatabricksError) as e:
+            raise UserException(f"Failed to fetch query result from Databricks: {str(e)}") from e
 
         if chunk_index == 0:
             # Empty result: build an empty parquet from the result schema so the output table still has
-            # the correct columns and an (empty) manifest is written downstream.
+            # the correct columns and types and an (empty) manifest is written downstream.
             columns = resp.manifest.schema.columns if resp.manifest and resp.manifest.schema else []
-            empty = pa.table({c.name: pa.array([], type=pa.string()) for c in columns})
+            empty = pa.table({c.name: pa.array([], type=self._arrow_type_from_column(c)) for c in columns})
             pq.write_table(empty, os.path.join(result_dir, "chunk_0.parquet"))
 
         return os.path.join(result_dir, "*.parquet")
+
+    @staticmethod
+    def _arrow_type_from_column(column) -> "pa.DataType":
+        """Maps a Databricks result-manifest column to a pyarrow type (used for empty results)."""
+        type_name = column.type_name.value if column.type_name else "STRING"
+        if type_name == "DECIMAL":
+            return pa.decimal128(column.type_precision or 38, column.type_scale or 0)
+        return {
+            "BOOLEAN": pa.bool_(),
+            "BYTE": pa.int8(),
+            "SHORT": pa.int16(),
+            "INT": pa.int32(),
+            "LONG": pa.int64(),
+            "FLOAT": pa.float32(),
+            "DOUBLE": pa.float64(),
+            "DATE": pa.date32(),
+            "TIMESTAMP": pa.timestamp("us"),
+        }.get(type_name, pa.string())
 
     def _get_temp_credentials(self, w: WorkspaceClient):
         try:
@@ -286,18 +312,19 @@ class Component(ComponentBase):
         return table_name or "query_result"
 
     def get_query(self):
-        if self.params.data_selection.mode == "workspace_query":
+        mode = self.params.data_selection.mode
+        if mode == DataSelectionMode.workspace_query:
             # The user's SQL already ran on the warehouse; here we only read the staged result.
             query = f"SELECT * FROM read_parquet('{self._workspace_result_glob}')"
-        elif self.params.data_selection.mode == "custom_query":
+        elif mode == DataSelectionMode.custom_query:
             query = self.params.data_selection.query.lower().replace(
                 "from in_table ", f"FROM delta_scan('{self.source_uri}')"
             )
-        elif self.params.data_selection.mode == "select_columns":
+        elif mode == DataSelectionMode.select_columns:
             query = f"""
             SELECT {", ".join(self.params.data_selection.columns)}
             FROM delta_scan('{self.source_uri}')"""
-        elif self.params.data_selection.mode == "all_data":
+        elif mode == DataSelectionMode.all_data:
             query = f"SELECT * FROM delta_scan('{self.source_uri}')"
         else:
             raise UserException("Invalid data selection mode")

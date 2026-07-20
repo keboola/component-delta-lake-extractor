@@ -5,6 +5,7 @@ from types import SimpleNamespace as NS
 
 from freezegun import freeze_time
 
+import pyarrow as pa
 from databricks.sdk.service.sql import StatementState
 from keboola.component.dao import SupportedDataTypes
 from keboola.component.exceptions import UserException
@@ -41,6 +42,10 @@ def fake_response(state, external_links=None, next_chunk_index=None, columns=Non
 
 def fake_link(url="https://presigned/chunk", headers=None):
     return NS(external_link=url, http_headers=headers)
+
+
+def fake_column(name, type_name, precision=None, scale=None):
+    return NS(name=name, type_name=NS(value=type_name), type_precision=precision, type_scale=scale)
 
 
 class TestComponent(unittest.TestCase):
@@ -170,6 +175,25 @@ class TestComponent(unittest.TestCase):
         self.assertEqual(req.get.call_count, 2)
         self.assertEqual(pq.write_table.call_count, 2)
         w.statement_execution.get_statement_result_chunk_n.assert_called_once_with("stmt-1", 1)
+        # presigned download must carry an explicit timeout
+        self.assertEqual(req.get.call_args.kwargs.get("timeout"), (10, 300))
+
+    def test_execute_workspace_query_download_error_raises_userexception(self):
+        import requests
+
+        comp = make_component(
+            data_selection={"mode": "workspace_query", "query": "SELECT 1", "warehouse_id": "wh1"}
+        )
+        w = mock.MagicMock()
+        comp._get_workspace_client = lambda: w
+        w.statement_execution.execute_statement.return_value = fake_response(
+            StatementState.SUCCEEDED, external_links=[fake_link()], next_chunk_index=None
+        )
+        # patch only requests.get so the real requests.RequestException hierarchy stays intact
+        with mock.patch("component.requests.get", side_effect=requests.ConnectionError("boom")):
+            with self.assertRaises(UserException) as ctx:
+                comp._execute_workspace_query("SELECT 1")
+        self.assertIn("Failed to fetch query result", str(ctx.exception))
 
     @mock.patch("component.pq")
     @mock.patch("component.pa")
@@ -223,7 +247,7 @@ class TestComponent(unittest.TestCase):
             StatementState.SUCCEEDED,
             external_links=[],
             next_chunk_index=None,
-            columns=[NS(name="a"), NS(name="b")],
+            columns=[fake_column("a", "STRING"), fake_column("b", "LONG")],
         )
 
         comp._execute_workspace_query("SELECT 1")
@@ -231,6 +255,23 @@ class TestComponent(unittest.TestCase):
         # no chunks downloaded, but one empty parquet written from the manifest schema
         req.get.assert_not_called()
         self.assertEqual(pq.write_table.call_count, 1)
+
+    def test_arrow_type_from_column(self):
+        cases = {
+            ("STRING", None, None): pa.string(),
+            ("LONG", None, None): pa.int64(),
+            ("INT", None, None): pa.int32(),
+            ("DOUBLE", None, None): pa.float64(),
+            ("FLOAT", None, None): pa.float32(),
+            ("BOOLEAN", None, None): pa.bool_(),
+            ("DATE", None, None): pa.date32(),
+            ("TIMESTAMP", None, None): pa.timestamp("us"),
+            ("DECIMAL", 10, 2): pa.decimal128(10, 2),
+            ("ARRAY", None, None): pa.string(),  # unmapped -> string
+        }
+        for (type_name, precision, scale), expected in cases.items():
+            col = fake_column("c", type_name, precision, scale)
+            self.assertEqual(Component._arrow_type_from_column(col), expected, msg=type_name)
 
     # --- sync action ------------------------------------------------------------------
 
