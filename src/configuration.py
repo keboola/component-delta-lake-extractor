@@ -8,10 +8,16 @@ class AccessMethod(str, Enum):
     direct_storage = "direct_storage"
 
 
+class AuthType(str, Enum):
+    pat = "pat"
+    service_principal = "service_principal"
+
+
 class DataSelectionMode(str, Enum):
     all_data = "all_data"
     select_columns = "select_columns"
     custom_query = "custom_query"
+    workspace_query = "workspace_query"
 
 
 class LoadType(str, Enum):
@@ -32,6 +38,7 @@ class DataSelection(BaseModel):
     mode: DataSelectionMode = Field(default=DataSelectionMode.all_data)
     columns: list[str] = Field(default_factory=list)
     query: str = ""
+    warehouse_id: str = ""
 
 
 class Destination(BaseModel):
@@ -52,7 +59,10 @@ class Configuration(BaseModel):
     access_method: AccessMethod = Field(default=AccessMethod.direct_storage)
     provider: str = None
     unity_catalog_url: str = None
+    auth_type: AuthType = Field(default=AuthType.pat)
     unity_catalog_token: str = Field(alias="#unity_catalog_token", default=None)
+    unity_catalog_client_id: str = None
+    unity_catalog_client_secret: str = Field(alias="#unity_catalog_client_secret", default=None)
     abs_account_name: str = None
     abs_sas_token: str = Field(alias="#abs_sas_token", default=None)
     aws_region: str = None

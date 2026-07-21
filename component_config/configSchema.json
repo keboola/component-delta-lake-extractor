@@ -32,14 +32,60 @@
         }
       }
     },
+    "auth_type": {
+      "enum": [
+        "pat",
+        "service_principal"
+      ],
+      "type": "string",
+      "title": "Authentication Type",
+      "default": "pat",
+      "options": {
+        "enum_titles": [
+          "Personal Access Token",
+          "Service Principal (OAuth M2M)"
+        ],
+        "dependencies": {
+          "access_method": "unity_catalog"
+        }
+      },
+      "description": "Choose how to authenticate to Unity Catalog.",
+      "propertyOrder": 4
+    },
     "#unity_catalog_token": {
       "type": "string",
       "title": "PAT token",
       "format": "password",
-      "propertyOrder": 4,
+      "propertyOrder": 5,
       "options": {
         "dependencies": {
-          "access_method": "unity_catalog"
+          "access_method": "unity_catalog",
+          "auth_type": "pat"
+        }
+      }
+    },
+    "unity_catalog_client_id": {
+      "type": "string",
+      "title": "Client ID",
+      "description": "The service principal's Application (client) ID.",
+      "propertyOrder": 6,
+      "options": {
+        "dependencies": {
+          "access_method": "unity_catalog",
+          "auth_type": "service_principal"
+        }
+      }
+    },
+    "#unity_catalog_client_secret": {
+      "type": "string",
+      "title": "Client Secret",
+      "format": "password",
+      "description": "The service principal's OAuth secret.",
+      "propertyOrder": 7,
+      "options": {
+        "dependencies": {
+          "access_method": "unity_catalog",
+          "auth_type": "service_principal"
         }
       }
     },
