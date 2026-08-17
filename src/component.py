@@ -3,6 +3,7 @@ import logging
 import os
 import time
 from collections import OrderedDict
+from urllib.parse import urlparse, urlunparse
 
 import requests
 from databricks.sdk import WorkspaceClient
@@ -273,6 +274,9 @@ class Component(ComponentBase):
                 except IndexError:
                     raise IndexError(f"Unable to extract account name from storage URL: {temp_creds.url}")
                 self.params.abs_sas_token = temp_creds.azure_user_delegation_sas.sas_token
+                # DuckDB reads the endpoint from a fully qualified abfss:// URL, not from the secret,
+                # so a non-standard port has to be injected into the URL host itself.
+                self.source_uri = self._with_storage_port(temp_creds.url)
 
             else:
                 raise UserException(
@@ -284,6 +288,13 @@ class Component(ComponentBase):
                 abs_conn_str = (
                     f"AccountName={self.params.abs_account_name};SharedAccessSignature={self.params.abs_sas_token}"
                 )
+                if self.params.abs_port:
+                    # az:// URIs carry no host, so for direct storage the port can only be passed
+                    # through an explicit endpoint in the connection string.
+                    abs_conn_str += (
+                        f";BlobEndpoint=https://{self.params.abs_account_name}"
+                        f".blob.core.windows.net:{self.params.abs_port}"
+                    )
                 query = f"""
                         CREATE SECRET (
                             TYPE AZURE,
@@ -312,6 +323,24 @@ class Component(ComponentBase):
                 raise UserException(f"Unknown provider: {self.params.provider}")
 
         return query
+
+    def _with_storage_port(self, url: str) -> str:
+        """
+        Rewrites the host of a fully qualified storage URL (e.g.
+        `abfss://container@account.dfs.core.windows.net/path`) so it points to the configured
+        non-standard port. Returns the URL unchanged when no port is configured or when the URL
+        already carries an explicit port.
+        """
+        if not self.params.abs_port:
+            return url
+
+        parsed = urlparse(url)
+        userinfo, _, host = parsed.netloc.rpartition("@")
+        if not host or ":" in host:
+            return url
+
+        netloc = f"{userinfo}@{host}:{self.params.abs_port}" if userinfo else f"{host}:{self.params.abs_port}"
+        return urlunparse(parsed._replace(netloc=netloc))
 
     def build_source_uri(self):
         match self.params.provider:

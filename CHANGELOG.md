@@ -1,5 +1,15 @@
 # Changelog
 
+## Azure storage port
+
+### Added
+- **Azure Storage Port** (`abs_port`, optional): allows specifying a non-standard port of the Azure
+  storage endpoint (private endpoint, gateway or emulator). For direct storage access the port is
+  passed as an explicit `BlobEndpoint` in the DuckDB Azure secret; for Unity Catalog access it is
+  injected into the host of the `abfss://` URL returned by Databricks temporary table credentials,
+  because DuckDB takes the endpoint from a fully qualified URL rather than from the secret.
+  When the field is left empty nothing changes for existing configurations.
+
 ## [CFTL-719] Service principal auth + Databricks SQL query mode
 
 ### Added

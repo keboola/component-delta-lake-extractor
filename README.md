@@ -12,6 +12,8 @@ Direct access to delta tables in your blob storage. We currently support the fol
 
 In this mode, the Delta Table path is defined by specifying the bucket/container and blob location where the table data is stored.
 
+**Azure Storage Port (optional):** if your storage endpoint is not reachable on the default HTTPS port (private endpoint, gateway or a storage emulator), fill in the **Azure Storage Port** field. The port is then used for the storage endpoint in both access modes — for Direct Access it is passed as an explicit `BlobEndpoint` (`https://<account>.blob.core.windows.net:<port>`), and for Unity Catalog it is injected into the host of the `abfss://` URL returned by Databricks temporary credentials. Leave the field empty to use the default port.
+
 ### 2. Unity Catalog
 Currently we support only Azure Blob Storage backend.
 

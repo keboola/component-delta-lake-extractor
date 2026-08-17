@@ -323,6 +323,95 @@ class TestComponent(unittest.TestCase):
             col = fake_column("c", type_name, precision, scale)
             self.assertEqual(Component._arrow_type_from_column(col), expected, msg=type_name)
 
+    # --- azure storage port -----------------------------------------------------------
+
+    def test_abs_connection_query_without_port_has_no_endpoint(self):
+        comp = make_component(
+            access_method="direct_storage",
+            provider="abs",
+            abs_account_name="acct",
+            **{"#abs_sas_token": "sv=2024"},
+        )
+        query = comp.build_connection_query()
+        self.assertIn("AccountName=acct;SharedAccessSignature=sv=2024", query)
+        self.assertNotIn("BlobEndpoint", query)
+
+    def test_abs_connection_query_with_port_sets_blob_endpoint(self):
+        comp = make_component(
+            access_method="direct_storage",
+            provider="abs",
+            abs_account_name="acct",
+            abs_port=10000,
+            **{"#abs_sas_token": "sv=2024"},
+        )
+        query = comp.build_connection_query()
+        self.assertIn("BlobEndpoint=https://acct.blob.core.windows.net:10000", query)
+
+    def test_with_storage_port_noop_without_port(self):
+        comp = make_component()
+        url = "abfss://cont@acct.dfs.core.windows.net/schema/table"
+        self.assertEqual(comp._with_storage_port(url), url)
+
+    def test_with_storage_port_rewrites_host(self):
+        comp = make_component(abs_port=10000)
+        self.assertEqual(
+            comp._with_storage_port("abfss://cont@acct.dfs.core.windows.net/schema/table"),
+            "abfss://cont@acct.dfs.core.windows.net:10000/schema/table",
+        )
+
+    def test_with_storage_port_keeps_existing_port(self):
+        comp = make_component(abs_port=10000)
+        url = "abfss://cont@acct.dfs.core.windows.net:8443/schema/table"
+        self.assertEqual(comp._with_storage_port(url), url)
+
+    def test_unity_catalog_source_uri_gets_port(self):
+        comp = make_component(abs_port=10000)
+        comp._get_workspace_client = lambda: mock.MagicMock()
+        comp._get_temp_credentials = lambda w: NS(
+            url="abfss://cont@acct.dfs.core.windows.net/schema/table",
+            aws_temp_credentials=None,
+            azure_user_delegation_sas=NS(sas_token="sv=2024"),
+        )
+
+        query = comp.build_connection_query()
+
+        self.assertEqual(comp.source_uri, "abfss://cont@acct.dfs.core.windows.net:10000/schema/table")
+        # the account name must still be extracted from the (un-ported) host
+        self.assertIn("AccountName=acct;", query)
+        self.assertIn("BlobEndpoint=https://acct.blob.core.windows.net:10000", query)
+
+    def test_unity_catalog_source_uri_without_port_unchanged(self):
+        comp = make_component()
+        comp._get_workspace_client = lambda: mock.MagicMock()
+        comp._get_temp_credentials = lambda w: NS(
+            url="abfss://cont@acct.dfs.core.windows.net/schema/table",
+            aws_temp_credentials=None,
+            azure_user_delegation_sas=NS(sas_token="sv=2024"),
+        )
+
+        query = comp.build_connection_query()
+
+        self.assertEqual(comp.source_uri, "abfss://cont@acct.dfs.core.windows.net/schema/table")
+        self.assertNotIn("BlobEndpoint", query)
+
+    def test_direct_storage_abs_source_uri_ignores_port(self):
+        comp = make_component(
+            access_method="direct_storage",
+            provider="abs",
+            abs_account_name="acct",
+            abs_port=10000,
+            source={"container_name": "cont", "blob_name": "tbl"},
+        )
+        self.assertEqual(comp.build_source_uri(), "az://cont/tbl")
+
+    def test_abs_port_empty_string_is_none(self):
+        comp = make_component(abs_port="")
+        self.assertIsNone(comp.params.abs_port)
+
+    def test_abs_port_out_of_range_raises_user_exception(self):
+        with self.assertRaises(UserException):
+            make_component(abs_port=99999)
+
     # --- sync action ------------------------------------------------------------------
 
     def test_list_warehouses(self):
