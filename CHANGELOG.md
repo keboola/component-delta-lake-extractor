@@ -9,6 +9,11 @@
   injected into the host of the `abfss://` URL returned by Databricks temporary table credentials,
   because DuckDB takes the endpoint from a fully qualified URL rather than from the secret.
   When the field is left empty nothing changes for existing configurations.
+- **Debug logging** for the Azure storage path (enabled by the `debug` parameter): the URL and
+  credential type returned by Unity Catalog temporary credentials, the storage account name extracted
+  from that URL, the port substitution in the storage URL (including the reason when it is skipped),
+  the resulting `delta_scan` source URI and the explicit `BlobEndpoint`. The SAS token itself is never
+  logged - only its length.
 
 ## [CFTL-719] Service principal auth + Databricks SQL query mode
 

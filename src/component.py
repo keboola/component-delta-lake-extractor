@@ -257,6 +257,19 @@ class Component(ComponentBase):
             w = self._get_workspace_client()
 
             temp_creds = self._get_temp_credentials(w)
+            if temp_creds.aws_temp_credentials:
+                credential_type = "aws_temp_credentials"
+            elif temp_creds.azure_user_delegation_sas:
+                credential_type = "azure_user_delegation_sas"
+            else:
+                credential_type = "none"
+            # The URL itself carries no signature (the SAS is a separate field), so it is safe to log.
+            logging.debug(
+                "Unity Catalog temporary credentials: url='%s', credential_type=%s, expiration_time=%s",
+                temp_creds.url,
+                credential_type,
+                getattr(temp_creds, "expiration_time", None),
+            )
             self.source_uri = temp_creds.url
 
             if temp_creds.aws_temp_credentials:
@@ -274,9 +287,16 @@ class Component(ComponentBase):
                 except IndexError:
                     raise IndexError(f"Unable to extract account name from storage URL: {temp_creds.url}")
                 self.params.abs_sas_token = temp_creds.azure_user_delegation_sas.sas_token
+                logging.debug(
+                    "Extracted storage account name '%s' from the credentials URL; "
+                    "user delegation SAS received (%s chars, value not logged).",
+                    self.params.abs_account_name,
+                    len(self.params.abs_sas_token or ""),
+                )
                 # DuckDB reads the endpoint from a fully qualified abfss:// URL, not from the secret,
                 # so a non-standard port has to be injected into the URL host itself.
                 self.source_uri = self._with_storage_port(temp_creds.url)
+                logging.debug("Source URI used for delta_scan: '%s'", self.source_uri)
 
             else:
                 raise UserException(
@@ -291,10 +311,11 @@ class Component(ComponentBase):
                 if self.params.abs_port:
                     # az:// URIs carry no host, so for direct storage the port can only be passed
                     # through an explicit endpoint in the connection string.
-                    abs_conn_str += (
-                        f";BlobEndpoint=https://{self.params.abs_account_name}"
-                        f".blob.core.windows.net:{self.params.abs_port}"
+                    blob_endpoint = (
+                        f"https://{self.params.abs_account_name}.blob.core.windows.net:{self.params.abs_port}"
                     )
+                    abs_conn_str += f";BlobEndpoint={blob_endpoint}"
+                    logging.debug("Azure secret uses an explicit BlobEndpoint '%s'.", blob_endpoint)
                 query = f"""
                         CREATE SECRET (
                             TYPE AZURE,
@@ -332,15 +353,26 @@ class Component(ComponentBase):
         already carries an explicit port.
         """
         if not self.params.abs_port:
+            logging.debug("No storage port configured, storage URL left unchanged: '%s'", url)
             return url
 
         parsed = urlparse(url)
         userinfo, _, host = parsed.netloc.rpartition("@")
-        if not host or ":" in host:
+        if not host:
+            logging.debug("Storage URL '%s' has no host, port %s not applied.", url, self.params.abs_port)
+            return url
+        if ":" in host:
+            logging.debug(
+                "Storage URL '%s' already contains an explicit port, configured port %s not applied.",
+                url,
+                self.params.abs_port,
+            )
             return url
 
         netloc = f"{userinfo}@{host}:{self.params.abs_port}" if userinfo else f"{host}:{self.params.abs_port}"
-        return urlunparse(parsed._replace(netloc=netloc))
+        rewritten = urlunparse(parsed._replace(netloc=netloc))
+        logging.debug("Storage URL host rewritten with the configured port: '%s' -> '%s'", url, rewritten)
+        return rewritten
 
     def build_source_uri(self):
         match self.params.provider:

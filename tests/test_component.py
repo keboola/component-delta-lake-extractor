@@ -412,6 +412,39 @@ class TestComponent(unittest.TestCase):
         with self.assertRaises(UserException):
             make_component(abs_port=99999)
 
+    # --- debug logging ----------------------------------------------------------------
+
+    def test_unity_catalog_debug_log_reports_url_and_rewrite(self):
+        comp = make_component(abs_port=10000)
+        comp._get_workspace_client = lambda: mock.MagicMock()
+        comp._get_temp_credentials = lambda w: NS(
+            url="abfss://cont@acct.dfs.core.windows.net/schema/table",
+            aws_temp_credentials=None,
+            azure_user_delegation_sas=NS(sas_token="sv=2024&sig=SECRETSAS"),
+            expiration_time=1700000000,
+        )
+
+        with self.assertLogs(level="DEBUG") as logs:
+            comp.build_connection_query()
+        output = "\n".join(logs.output)
+
+        # what Unity Catalog returned
+        self.assertIn("abfss://cont@acct.dfs.core.windows.net/schema/table", output)
+        self.assertIn("azure_user_delegation_sas", output)
+        self.assertIn("acct", output)
+        # how the port substitution went
+        self.assertIn("acct.dfs.core.windows.net:10000", output)
+        self.assertIn("BlobEndpoint", output)
+        # the SAS token itself must never be logged
+        self.assertNotIn("SECRETSAS", output)
+        self.assertNotIn("sig=", output)
+
+    def test_with_storage_port_logs_skip_reason(self):
+        comp = make_component()
+        with self.assertLogs(level="DEBUG") as logs:
+            comp._with_storage_port("abfss://cont@acct.dfs.core.windows.net/t")
+        self.assertIn("no storage port configured", "\n".join(logs.output).lower())
+
     # --- sync action ------------------------------------------------------------------
 
     def test_list_warehouses(self):
