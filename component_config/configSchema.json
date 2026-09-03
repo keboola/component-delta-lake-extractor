@@ -136,7 +136,7 @@
     "abs_port": {
       "type": "integer",
       "title": "Azure Storage Port",
-      "description": "(Optional) Non-standard port of the Azure storage endpoint (e.g. a private endpoint, gateway or emulator). Leave empty to use the default HTTPS port. Applies to Azure Blob Storage only, in both Direct Storage and Unity Catalog access.",
+      "description": "(Optional) Non-standard port of the Azure storage endpoint (e.g. a private endpoint, gateway or emulator). Leave empty to use the default HTTPS port. Applies to Azure Blob Storage with Direct Storage access only - for Unity Catalog the port is taken from the storage URL returned by Databricks.",
       "minimum": 1,
       "maximum": 65535,
       "propertyOrder": 5

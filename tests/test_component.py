@@ -347,40 +347,44 @@ class TestComponent(unittest.TestCase):
         query = comp.build_connection_query()
         self.assertIn("BlobEndpoint=https://acct.blob.core.windows.net:10000", query)
 
-    def test_with_storage_port_noop_without_port(self):
-        comp = make_component()
-        url = "abfss://cont@acct.dfs.core.windows.net/schema/table"
-        self.assertEqual(comp._with_storage_port(url), url)
-
-    def test_with_storage_port_rewrites_host(self):
-        comp = make_component(abs_port=10000)
+    def test_abfss_to_blob_keeps_port(self):
         self.assertEqual(
-            comp._with_storage_port("abfss://cont@acct.dfs.core.windows.net/schema/table"),
-            "abfss://cont@acct.dfs.core.windows.net:10000/schema/table",
+            Component._abfss_to_blob("abfss://cont@acct.dfs.core.windows.net:10000/schema/table"),
+            ("acct", "https://acct.blob.core.windows.net:10000", "az://cont/schema/table"),
         )
 
-    def test_with_storage_port_keeps_existing_port(self):
-        comp = make_component(abs_port=10000)
-        url = "abfss://cont@acct.dfs.core.windows.net:8443/schema/table"
-        self.assertEqual(comp._with_storage_port(url), url)
+    def test_abfss_to_blob_without_port(self):
+        self.assertEqual(
+            Component._abfss_to_blob("abfss://cont@acct.dfs.core.windows.net/schema/table"),
+            ("acct", "https://acct.blob.core.windows.net", "az://cont/schema/table"),
+        )
 
-    def test_unity_catalog_source_uri_gets_port(self):
-        comp = make_component(abs_port=10000)
+    def test_abfss_to_blob_rejects_unexpected_url(self):
+        for url in ("abfss://acct.dfs.core.windows.net/table", "https://acct/table"):
+            with self.assertRaises(UserException, msg=url):
+                Component._abfss_to_blob(url)
+
+    def test_abfss_to_blob_rejects_invalid_port(self):
+        with self.assertRaises(UserException):
+            Component._abfss_to_blob("abfss://cont@acct.dfs.core.windows.net:nope/table")
+
+    def test_unity_catalog_uses_blob_endpoint_with_port_from_url(self):
+        comp = make_component()
         comp._get_workspace_client = lambda: mock.MagicMock()
         comp._get_temp_credentials = lambda w: NS(
-            url="abfss://cont@acct.dfs.core.windows.net/schema/table",
+            url="abfss://cont@acct.dfs.core.windows.net:10000/schema/table",
             aws_temp_credentials=None,
             azure_user_delegation_sas=NS(sas_token="sv=2024"),
         )
 
         query = comp.build_connection_query()
 
-        self.assertEqual(comp.source_uri, "abfss://cont@acct.dfs.core.windows.net:10000/schema/table")
-        # the account name must still be extracted from the (un-ported) host
+        # The abfss/DFS route cannot honour the port, so the data is addressed over blob instead.
+        self.assertEqual(comp.source_uri, "az://cont/schema/table")
         self.assertIn("AccountName=acct;", query)
         self.assertIn("BlobEndpoint=https://acct.blob.core.windows.net:10000", query)
 
-    def test_unity_catalog_source_uri_without_port_unchanged(self):
+    def test_unity_catalog_without_port_pins_default_blob_endpoint(self):
         comp = make_component()
         comp._get_workspace_client = lambda: mock.MagicMock()
         comp._get_temp_credentials = lambda w: NS(
@@ -391,8 +395,23 @@ class TestComponent(unittest.TestCase):
 
         query = comp.build_connection_query()
 
-        self.assertEqual(comp.source_uri, "abfss://cont@acct.dfs.core.windows.net/schema/table")
-        self.assertNotIn("BlobEndpoint", query)
+        self.assertEqual(comp.source_uri, "az://cont/schema/table")
+        # Identical to what the Azure SDK derives from AccountName, so no behaviour change.
+        self.assertIn("BlobEndpoint=https://acct.blob.core.windows.net'", query)
+
+    def test_unity_catalog_prefers_url_port_over_configured_port(self):
+        comp = make_component(abs_port=10000)
+        comp._get_workspace_client = lambda: mock.MagicMock()
+        comp._get_temp_credentials = lambda w: NS(
+            url="abfss://cont@acct.dfs.core.windows.net:8443/schema/table",
+            aws_temp_credentials=None,
+            azure_user_delegation_sas=NS(sas_token="sv=2024"),
+        )
+
+        query = comp.build_connection_query()
+
+        self.assertIn("BlobEndpoint=https://acct.blob.core.windows.net:8443", query)
+        self.assertNotIn("10000", query)
 
     def test_direct_storage_abs_source_uri_ignores_port(self):
         comp = make_component(
@@ -414,11 +433,11 @@ class TestComponent(unittest.TestCase):
 
     # --- debug logging ----------------------------------------------------------------
 
-    def test_unity_catalog_debug_log_reports_url_and_rewrite(self):
-        comp = make_component(abs_port=10000)
+    def test_unity_catalog_debug_log_reports_url_and_target(self):
+        comp = make_component()
         comp._get_workspace_client = lambda: mock.MagicMock()
         comp._get_temp_credentials = lambda w: NS(
-            url="abfss://cont@acct.dfs.core.windows.net/schema/table",
+            url="abfss://cont@acct.dfs.core.windows.net:10000/schema/table",
             aws_temp_credentials=None,
             azure_user_delegation_sas=NS(sas_token="sv=2024&sig=SECRETSAS"),
             expiration_time=1700000000,
@@ -429,21 +448,29 @@ class TestComponent(unittest.TestCase):
         output = "\n".join(logs.output)
 
         # what Unity Catalog returned
-        self.assertIn("abfss://cont@acct.dfs.core.windows.net/schema/table", output)
+        self.assertIn("abfss://cont@acct.dfs.core.windows.net:10000/schema/table", output)
         self.assertIn("azure_user_delegation_sas", output)
         self.assertIn("acct", output)
-        # how the port substitution went
-        self.assertIn("acct.dfs.core.windows.net:10000", output)
-        self.assertIn("BlobEndpoint", output)
+        # where the read is actually addressed
+        self.assertIn("az://cont/schema/table", output)
+        self.assertIn("BlobEndpoint 'https://acct.blob.core.windows.net:10000'", output)
         # the SAS token itself must never be logged
         self.assertNotIn("SECRETSAS", output)
         self.assertNotIn("sig=", output)
 
-    def test_with_storage_port_logs_skip_reason(self):
-        comp = make_component()
+    def test_unity_catalog_debug_log_notes_ignored_port(self):
+        comp = make_component(abs_port=10000)
+        comp._get_workspace_client = lambda: mock.MagicMock()
+        comp._get_temp_credentials = lambda w: NS(
+            url="abfss://cont@acct.dfs.core.windows.net/schema/table",
+            aws_temp_credentials=None,
+            azure_user_delegation_sas=NS(sas_token="sv=2024"),
+        )
+
         with self.assertLogs(level="DEBUG") as logs:
-            comp._with_storage_port("abfss://cont@acct.dfs.core.windows.net/t")
-        self.assertIn("no storage port configured", "\n".join(logs.output).lower())
+            comp.build_connection_query()
+
+        self.assertIn("ignored", "\n".join(logs.output).lower())
 
     # --- sync action ------------------------------------------------------------------
 

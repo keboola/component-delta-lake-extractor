@@ -12,9 +12,11 @@ Direct access to delta tables in your blob storage. We currently support the fol
 
 In this mode, the Delta Table path is defined by specifying the bucket/container and blob location where the table data is stored.
 
-**Azure Storage Port (optional):** if your storage endpoint is not reachable on the default HTTPS port (private endpoint, gateway or a storage emulator), fill in the **Azure Storage Port** field. The port is then used for the storage endpoint in both access modes — for Direct Access it is passed as an explicit `BlobEndpoint` (`https://<account>.blob.core.windows.net:<port>`), and for Unity Catalog it is injected into the host of the `abfss://` URL returned by Databricks temporary credentials. Leave the field empty to use the default port.
+**Azure Storage Port (optional):** if your storage endpoint is not reachable on the default HTTPS port (private endpoint, gateway or a storage emulator), fill in the **Azure Storage Port** field. It is passed as an explicit `BlobEndpoint` (`https://<account>.blob.core.windows.net:<port>`) in the storage credentials. Leave the field empty to use the default port. This field applies to **Direct Access** only — for Unity Catalog the port is taken from the storage URL that Databricks itself returns, so it needs no configuration.
 
-Set the `debug` parameter to `true` to log what Unity Catalog returned (storage URL, credential type) and how the port was applied to the storage URL and to the `BlobEndpoint`. The SAS token is never logged.
+Azure reads are always addressed over the blob endpoint (`az://<container>/<path>`), including in Unity Catalog mode where Databricks hands out an `abfss://` URL. The ADLS/DFS route cannot honour a non-default port: DuckDB's Azure extension passes the credentials straight to the Azure SDK for C++, which derives its DataLake endpoint from the account name unless the connection string carries a `DfsEndpoint` key, so the port is dropped and port 443 is dialled ([duckdb-azure#77](https://github.com/duckdb/duckdb-azure/issues/77)).
+
+Set the `debug` parameter to `true` to log what Unity Catalog returned (storage URL, credential type), the source URI the read is addressed to, and the `BlobEndpoint` in use. The SAS token is never logged.
 
 ### 2. Unity Catalog
 Currently we support only Azure Blob Storage backend.
