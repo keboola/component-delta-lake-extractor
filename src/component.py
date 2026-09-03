@@ -283,7 +283,9 @@ class Component(ComponentBase):
             elif temp_creds.azure_user_delegation_sas:
                 self.params.provider = "abs"
                 # url always has this pattern: ...@ACCOUNT_NAME.dfs... https://docs.databricks.com/aws/en/connect/storage/azure-storage?language=Account%C2%A0key#access-azure-storage  # noqa: E501
-                self.params.abs_account_name, blob_endpoint, self.source_uri = self._abfss_to_blob(temp_creds.url)
+                self.params.abs_account_name, blob_endpoint, self.source_uri = self._abfss_to_blob(
+                    temp_creds.url, self.params.abs_port
+                )
                 self.params.abs_sas_token = temp_creds.azure_user_delegation_sas.sas_token
                 logging.debug(
                     "Extracted storage account name '%s' from the credentials URL; "
@@ -291,12 +293,6 @@ class Component(ComponentBase):
                     self.params.abs_account_name,
                     len(self.params.abs_sas_token or ""),
                 )
-                if self.params.abs_port:
-                    logging.debug(
-                        "Configured storage port %s ignored: for Unity Catalog the port is taken from "
-                        "the credentials URL itself.",
-                        self.params.abs_port,
-                    )
                 logging.debug("Source URI used for delta_scan: '%s'", self.source_uri)
 
             else:
@@ -351,7 +347,7 @@ class Component(ComponentBase):
         return query
 
     @staticmethod
-    def _abfss_to_blob(url: str) -> tuple[str, str, str]:
+    def _abfss_to_blob(url: str, fallback_port: int = None) -> tuple[str, str, str]:
         """
         Re-addresses a Unity Catalog storage URL onto the Blob endpoint.
 
@@ -362,6 +358,10 @@ class Component(ComponentBase):
         the reader, and it falls back to 443 (duckdb/duckdb-azure#77). Addressing the same data as
         `az://<container>/<path>` with an explicit `BlobEndpoint` keeps the port, and is the
         combination duckdb-azure and duckdb-delta test against Azurite (itself on a non-default port).
+
+        The port is taken from the credentials URL when Databricks states one; otherwise
+        `fallback_port` (the configured `abs_port`) is applied, because a private-endpoint workspace
+        can hand out a portless URL even when the storage endpoint is not on 443.
 
         Returns (account_name, blob_endpoint, duckdb_uri).
         """
@@ -377,6 +377,14 @@ class Component(ComponentBase):
                 "Unexpected storage URL returned by Unity Catalog, expected "
                 f"abfss://<container>@<account>.dfs.<suffix>/<path>: {url}"
             )
+
+        if port and fallback_port and fallback_port != port:
+            logging.debug(
+                "Configured storage port %s overridden by port %s stated in the credentials URL.",
+                fallback_port,
+                port,
+            )
+        port = port or fallback_port
 
         account = host.split(".", 1)[0]
         # The DFS and Blob endpoints of an account differ only in this label.

@@ -368,6 +368,19 @@ class TestComponent(unittest.TestCase):
         with self.assertRaises(UserException):
             Component._abfss_to_blob("abfss://cont@acct.dfs.core.windows.net:nope/table")
 
+    def test_abfss_to_blob_falls_back_to_configured_port(self):
+        # A private-endpoint workspace can return a portless URL even when storage is not on 443.
+        self.assertEqual(
+            Component._abfss_to_blob("abfss://cont@acct.dfs.core.windows.net/schema/table", 44317),
+            ("acct", "https://acct.blob.core.windows.net:44317", "az://cont/schema/table"),
+        )
+
+    def test_abfss_to_blob_url_port_wins_over_fallback(self):
+        self.assertEqual(
+            Component._abfss_to_blob("abfss://cont@acct.dfs.core.windows.net:8443/schema/table", 44317)[1],
+            "https://acct.blob.core.windows.net:8443",
+        )
+
     def test_unity_catalog_uses_blob_endpoint_with_port_from_url(self):
         comp = make_component()
         comp._get_workspace_client = lambda: mock.MagicMock()
@@ -398,6 +411,21 @@ class TestComponent(unittest.TestCase):
         self.assertEqual(comp.source_uri, "az://cont/schema/table")
         # Identical to what the Azure SDK derives from AccountName, so no behaviour change.
         self.assertIn("BlobEndpoint=https://acct.blob.core.windows.net'", query)
+
+    def test_unity_catalog_portless_url_uses_configured_port(self):
+        # ST-4450: the workspace returns a portless URL, so abs_port is the only source of the port.
+        comp = make_component(abs_port=44317)
+        comp._get_workspace_client = lambda: mock.MagicMock()
+        comp._get_temp_credentials = lambda w: NS(
+            url="abfss://cont@acct.dfs.core.windows.net/schema/table",
+            aws_temp_credentials=None,
+            azure_user_delegation_sas=NS(sas_token="sv=2024"),
+        )
+
+        query = comp.build_connection_query()
+
+        self.assertEqual(comp.source_uri, "az://cont/schema/table")
+        self.assertIn("BlobEndpoint=https://acct.blob.core.windows.net:44317", query)
 
     def test_unity_catalog_prefers_url_port_over_configured_port(self):
         comp = make_component(abs_port=10000)
@@ -458,11 +486,11 @@ class TestComponent(unittest.TestCase):
         self.assertNotIn("SECRETSAS", output)
         self.assertNotIn("sig=", output)
 
-    def test_unity_catalog_debug_log_notes_ignored_port(self):
+    def test_unity_catalog_debug_log_notes_overridden_port(self):
         comp = make_component(abs_port=10000)
         comp._get_workspace_client = lambda: mock.MagicMock()
         comp._get_temp_credentials = lambda w: NS(
-            url="abfss://cont@acct.dfs.core.windows.net/schema/table",
+            url="abfss://cont@acct.dfs.core.windows.net:8443/schema/table",
             aws_temp_credentials=None,
             azure_user_delegation_sas=NS(sas_token="sv=2024"),
         )
@@ -470,7 +498,7 @@ class TestComponent(unittest.TestCase):
         with self.assertLogs(level="DEBUG") as logs:
             comp.build_connection_query()
 
-        self.assertIn("ignored", "\n".join(logs.output).lower())
+        self.assertIn("overridden", "\n".join(logs.output).lower())
 
     # --- sync action ------------------------------------------------------------------
 

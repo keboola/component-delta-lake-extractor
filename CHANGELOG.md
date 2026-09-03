@@ -4,10 +4,10 @@
 
 ### Added
 - **Azure Storage Port** (`abs_port`, optional): allows specifying a non-standard port of the Azure
-  storage endpoint (private endpoint, gateway or emulator) for **direct storage** access, where it is
-  passed as an explicit `BlobEndpoint` in the DuckDB Azure secret. For **Unity Catalog** access the
-  port is taken from the credentials URL issued by Databricks, so this field is not needed (and is
-  ignored). When the field is left empty nothing changes for existing configurations.
+  storage endpoint (private endpoint, gateway or emulator). It is passed as an explicit `BlobEndpoint`
+  in the DuckDB Azure secret and applies to both access methods; with Unity Catalog a port stated in
+  the credentials URL issued by Databricks takes precedence, since such a workspace may hand out a
+  portless URL. When the field is left empty nothing changes for existing configurations.
 - **Debug logging** for the Azure storage path (enabled by the `debug` parameter): the URL and
   credential type returned by Unity Catalog temporary credentials, the storage account name extracted
   from that URL, the resulting `delta_scan` source URI and the explicit `BlobEndpoint`. The SAS token
