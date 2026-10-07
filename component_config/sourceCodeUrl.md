@@ -1,1 +1,1 @@
-https://github.com/keboola/data-lake-tables
+https://github.com/keboola/component-delta-lake-extractor
