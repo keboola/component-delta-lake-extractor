@@ -3,6 +3,7 @@ import logging
 import os
 import time
 from collections import OrderedDict
+from urllib.parse import urlsplit
 
 import requests
 from databricks.sdk import WorkspaceClient
@@ -252,10 +253,24 @@ class Component(ComponentBase):
 
     def build_connection_query(self):
         session_token = None
+        blob_endpoint = None
         if self.params.access_method == AccessMethod.unity_catalog:
             w = self._get_workspace_client()
 
             temp_creds = self._get_temp_credentials(w)
+            if temp_creds.aws_temp_credentials:
+                credential_type = "aws_temp_credentials"
+            elif temp_creds.azure_user_delegation_sas:
+                credential_type = "azure_user_delegation_sas"
+            else:
+                credential_type = "none"
+            # The URL itself carries no signature (the SAS is a separate field), so it is safe to log.
+            logging.debug(
+                "Unity Catalog temporary credentials: url='%s', credential_type=%s, expiration_time=%s",
+                temp_creds.url,
+                credential_type,
+                getattr(temp_creds, "expiration_time", None),
+            )
             self.source_uri = temp_creds.url
 
             if temp_creds.aws_temp_credentials:
@@ -267,12 +282,18 @@ class Component(ComponentBase):
 
             elif temp_creds.azure_user_delegation_sas:
                 self.params.provider = "abs"
-                try:
-                    # url should always have this pattern: ...@ACCOUNT_NAME.dfs... https://docs.databricks.com/aws/en/connect/storage/azure-storage?language=Account%C2%A0key#access-azure-storage  # noqa: E501
-                    self.params.abs_account_name = temp_creds.url.split("@")[1].split(".dfs")[0]
-                except IndexError:
-                    raise IndexError(f"Unable to extract account name from storage URL: {temp_creds.url}")
+                # url always has this pattern: ...@ACCOUNT_NAME.dfs... https://docs.databricks.com/aws/en/connect/storage/azure-storage?language=Account%C2%A0key#access-azure-storage  # noqa: E501
+                self.params.abs_account_name, blob_endpoint, self.source_uri = self._abfss_to_blob(
+                    temp_creds.url, self.params.abs_port
+                )
                 self.params.abs_sas_token = temp_creds.azure_user_delegation_sas.sas_token
+                logging.debug(
+                    "Extracted storage account name '%s' from the credentials URL; "
+                    "user delegation SAS received (%s chars, value not logged).",
+                    self.params.abs_account_name,
+                    len(self.params.abs_sas_token or ""),
+                )
+                logging.debug("Source URI used for delta_scan: '%s'", self.source_uri)
 
             else:
                 raise UserException(
@@ -284,6 +305,18 @@ class Component(ComponentBase):
                 abs_conn_str = (
                     f"AccountName={self.params.abs_account_name};SharedAccessSignature={self.params.abs_sas_token}"
                 )
+                if not blob_endpoint and self.params.abs_port:
+                    # Direct storage: az:// URIs carry no host, so the port can only be passed
+                    # through an explicit endpoint in the connection string.
+                    blob_endpoint = (
+                        f"https://{self.params.abs_account_name}.blob.core.windows.net:{self.params.abs_port}"
+                    )
+                if blob_endpoint:
+                    # Pins host and port for both readers of a delta_scan: the C++ azure extension
+                    # (straight from BlobEndpoint) and delta's Rust object_store (duckdb-delta forwards
+                    # BlobEndpoint on as its azure_endpoint option).
+                    abs_conn_str += f";BlobEndpoint={blob_endpoint}"
+                    logging.debug("Azure secret uses an explicit BlobEndpoint '%s'.", blob_endpoint)
                 query = f"""
                         CREATE SECRET (
                             TYPE AZURE,
@@ -312,6 +345,55 @@ class Component(ComponentBase):
                 raise UserException(f"Unknown provider: {self.params.provider}")
 
         return query
+
+    @staticmethod
+    def _abfss_to_blob(url: str, fallback_port: int | None = None) -> tuple[str, str | None, str]:
+        """
+        Re-addresses a Unity Catalog storage URL onto the Blob endpoint when a non-default port is in effect.
+
+        Unity Catalog hands out `abfss://<container>@<account>.dfs.<suffix>[:<port>]/<path>`, but that
+        DFS route cannot honour a non-standard port. The Azure SDK for C++ builds its DataLake service
+        URL from the connection string's `DfsEndpoint` key alone and otherwise rebuilds it from
+        `AccountName`, so neither the port in the URL nor a `BlobEndpoint` pinning host:port reaches
+        the reader, and it falls back to 443 (duckdb/duckdb-azure#77). Addressing the same data as
+        `az://<container>/<path>` with an explicit `BlobEndpoint` keeps the port, and is the
+        combination duckdb-azure and duckdb-delta test against Azurite (itself on a non-default port).
+
+        The port is taken from the credentials URL when Databricks states one; otherwise
+        `fallback_port` (the configured `abs_port`) is applied, because a private-endpoint workspace
+        can hand out a portless URL even when the storage endpoint is not on 443. Without any port the
+        URL is returned unchanged and no endpoint is pinned, so default-port accounts read exactly as before.
+
+        Returns (account_name, blob_endpoint or None, duckdb_uri).
+        """
+        parts = urlsplit(url)
+        try:
+            container, host, port = parts.username, parts.hostname, parts.port
+        except ValueError:
+            # An unparseable port makes .port raise rather than return None.
+            raise UserException(f"Unable to parse the storage URL returned by Unity Catalog: {url}")
+
+        if not container or not host or "." not in host:
+            raise UserException(
+                "Unexpected storage URL returned by Unity Catalog, expected "
+                f"abfss://<container>@<account>.dfs.<suffix>/<path>: {url}"
+            )
+
+        if port and fallback_port and fallback_port != port:
+            logging.debug(
+                "Configured storage port %s overridden by port %s stated in the credentials URL.",
+                fallback_port,
+                port,
+            )
+        port = port or fallback_port
+
+        account = host.split(".", 1)[0]
+        if not port:
+            return account, None, url
+
+        # The DFS and Blob endpoints of an account differ only in this label.
+        blob_endpoint = f"https://{host.replace('.dfs.', '.blob.', 1)}:{port}"
+        return account, blob_endpoint, f"az://{container}/{parts.path.lstrip('/')}"
 
     def build_source_uri(self):
         match self.params.provider:

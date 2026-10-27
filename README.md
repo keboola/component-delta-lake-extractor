@@ -12,8 +12,16 @@ Direct access to delta tables in your blob storage. We currently support the fol
 
 In this mode, the Delta Table path is defined by specifying the bucket/container and blob location where the table data is stored.
 
+**Azure Storage Port (optional):** fill in this field only if your Azure storage endpoint is not reachable on the default HTTPS port 443 (for example a private endpoint or gateway). Leave it empty otherwise. It applies to Azure Blob Storage in both access modes and is ignored for AWS S3 and Google Cloud Storage. In Unity Catalog mode, a port in the storage URL returned by Databricks takes precedence, and this field covers the case where that URL has no port.
+
+When a port is set, the component passes it as an explicit `BlobEndpoint` (`https://<account>.blob.<suffix>:<port>`) in the storage credentials and reads Unity Catalog tables over the blob endpoint (`az://<container>/<path>`) instead of the `abfss://` URL from Databricks. The ADLS/DFS route cannot use a non-default port: the Azure SDK for C++ derives its DataLake endpoint from the account name and dials port 443 ([duckdb-azure#77](https://github.com/duckdb/duckdb-azure/issues/77)). Without a port, nothing changes.
+
+Set the `debug` parameter to `true` to log what Unity Catalog returned (storage URL, credential type), the source URI of the read, and the `BlobEndpoint` in use. The SAS token is never logged.
+
 ### 2. Unity Catalog
 Currently we support only Azure Blob Storage backend.
+
+**Unity Catalog URL:** the URL of the Databricks workspace. If the workspace is not reachable on port 443, add the port, for example `https://<workspace-host>:8443`.
 
 **Authentication:** Two options are supported:
 - **Personal Access Token (PAT)**: [How to get access token in Databricks](https://docs.databricks.com/aws/en/dev-tools/auth/pat#databricks-personal-access-tokens-for-workspace-users)
@@ -72,6 +80,14 @@ Run the test suite and lint check using this command:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 docker-compose run --rm test
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The Azure non-default-port test (`tests/test_azurite_port.py`) needs an Azurite container and is skipped in the
+run above. CI runs it on every push. Run it locally after any DuckDB or extension upgrade:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+docker build -t delta-lake-test .
+sh scripts/azurite_test.sh delta-lake-test
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Integration

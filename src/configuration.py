@@ -1,5 +1,6 @@
 from enum import Enum
-from pydantic import BaseModel, Field, ValidationError, computed_field
+from typing import Optional
+from pydantic import BaseModel, Field, ValidationError, computed_field, field_validator
 from keboola.component.exceptions import UserException
 
 
@@ -65,6 +66,9 @@ class Configuration(BaseModel):
     unity_catalog_client_secret: str = Field(alias="#unity_catalog_client_secret", default=None)
     abs_account_name: str = None
     abs_sas_token: str = Field(alias="#abs_sas_token", default=None)
+    # Non-standard port of the Azure storage endpoint (private endpoint / gateway / emulator).
+    # Left unset for the default 443 - no port is then injected anywhere.
+    abs_port: Optional[int] = Field(default=None, ge=1, le=65535)
     aws_region: str = None
     aws_key_id: str = None
     aws_key_secret: str = Field(alias="#aws_key_secret", default=None)
@@ -76,6 +80,14 @@ class Configuration(BaseModel):
     debug: bool = False
     threads: int = 1
     max_memory: int = 256
+
+    @field_validator("abs_port", mode="before")
+    @classmethod
+    def _empty_port_to_none(cls, value):
+        # The UI submits an empty string when the (optional) port field is left blank.
+        if value == "" or value is None:
+            return None
+        return value
 
     def __init__(self, **data):
         try:
