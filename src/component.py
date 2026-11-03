@@ -8,7 +8,8 @@ from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 import requests
-from databricks.sdk import WorkspaceClient
+from databricks.sdk import WorkspaceClient, oauth
+from databricks.sdk.credentials_provider import CredentialsStrategy, OAuthCredentialsProvider, credentials_strategy
 from databricks.sdk.service.catalog import TableOperation
 from databricks.sdk.service.sql import (
     Disposition,
@@ -145,12 +146,44 @@ class Component(ComponentBase):
         or with service principal (OAuth M2M) credentials, depending on the selected auth type.
         """
         if self.params.auth_type == AuthType.service_principal:
+            host = self.params.unity_catalog_url
+            extra = {}
+            if urlsplit(host).port:
+                extra["credentials_strategy"] = self._oauth_m2m_on_host(host)
             return WorkspaceClient(
-                host=self.params.unity_catalog_url,
+                host=host,
                 client_id=self.params.unity_catalog_client_id,
                 client_secret=self.params.unity_catalog_client_secret,
+                **extra,
             )
         return WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+
+    @staticmethod
+    def _oauth_m2m_on_host(host: str) -> CredentialsStrategy:
+        """
+        OAuth M2M with the token endpoint on the configured host, port included.
+        The SDK takes the OIDC endpoints from the workspace metadata, which names the host without the port,
+        so behind a gateway on a non-default port the token request times out after 5 minutes.
+        """
+        token_url = f"{host.rstrip('/')}/oidc/v1/token"
+
+        @credentials_strategy("oauth-m2m", ["host", "client_id", "client_secret"])
+        def strategy(cfg) -> OAuthCredentialsProvider:
+            token_source = oauth.ClientCredentials(
+                client_id=cfg.client_id,
+                client_secret=cfg.client_secret,
+                token_url=token_url,
+                scopes=cfg.get_scopes_as_string(),
+                use_header=True,
+            )
+
+            def headers() -> dict[str, str]:
+                token = token_source.token()
+                return {"Authorization": f"{token.token_type} {token.access_token}"}
+
+            return OAuthCredentialsProvider(headers, token_source.token)
+
+        return strategy
 
     def _execute_workspace_query(
         self, query: str, row_limit: int = None, poll_timeout: int = STATEMENT_POLL_TIMEOUT

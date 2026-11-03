@@ -23,6 +23,11 @@
   `az://<container>/<path>` and pins `BlobEndpoint` (with the port) in the DuckDB Azure secret. Both
   readers of a `delta_scan` honour it: the azure extension reads `BlobEndpoint` directly, and
   duckdb-delta forwards it as the `azure_endpoint` of its Rust object_store.
+- **Service principal (OAuth M2M) on a workspace URL with a port.** Every call timed out after
+  5 minutes. The Databricks SDK takes the OIDC endpoints from the workspace metadata, which names the
+  host without the port, so it requested the token on port 443. When `unity_catalog_url` has a port,
+  the component now requests the token from `<unity_catalog_url>/oidc/v1/token`. Without a port, the
+  SDK default is unchanged.
 - **Table preview and column list in "Databricks SQL Query" mode.** Both failed with
   `Path does not exist: "None/"`, because that mode skipped the storage credentials. They now load
   the credentials of the selected table.

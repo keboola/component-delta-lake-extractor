@@ -124,6 +124,26 @@ class TestComponent(unittest.TestCase):
             client_secret="client-secret",
         )
 
+    @mock.patch("component.WorkspaceClient")
+    def test_get_workspace_client_service_principal_with_port_uses_host_token_endpoint(self, wc):
+        comp = make_component(
+            auth_type="service_principal",
+            unity_catalog_url="https://workspace.example.com:12345",
+            unity_catalog_client_id="client-id",
+            **{"#unity_catalog_client_secret": "client-secret"},
+        )
+        comp._get_workspace_client()
+
+        strategy = wc.call_args.kwargs["credentials_strategy"]
+        self.assertEqual(strategy.auth_type(), "oauth-m2m")
+        cfg = NS(host="https://workspace.example.com:12345", client_id="client-id", client_secret="client-secret",
+                 group_id=None, get_scopes_as_string=lambda: "all-apis")
+        with mock.patch("component.oauth.ClientCredentials") as cc:
+            strategy(cfg)
+        # The workspace metadata names the host without the port, so the token URL must come from the config.
+        self.assertEqual(cc.call_args.kwargs["token_url"], "https://workspace.example.com:12345/oidc/v1/token")
+        self.assertEqual(cc.call_args.kwargs["client_id"], "client-id")
+
     # --- query building & naming ------------------------------------------------------
 
     def test_get_query_workspace_query(self):
