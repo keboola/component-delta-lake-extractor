@@ -1,11 +1,15 @@
 import io
 import logging
 import os
+import re
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
+from urllib.parse import urlsplit
 
 import requests
-from databricks.sdk import WorkspaceClient
+from databricks.sdk import WorkspaceClient, oauth
+from databricks.sdk.credentials_provider import CredentialsStrategy, OAuthCredentialsProvider, credentials_strategy
 from databricks.sdk.service.catalog import TableOperation
 from databricks.sdk.service.sql import (
     Disposition,
@@ -36,6 +40,9 @@ CLOUD_FETCH_TIMEOUT = (10, 300)
 STATEMENT_POLL_TIMEOUT = 1200
 PREVIEW_POLL_TIMEOUT = 25
 
+# The custom query is lowercased before the in_table placeholder is replaced.
+IN_TABLE_PATTERN = re.compile(r"\bfrom\s+in_table\b")
+
 
 class Component(ComponentBase):
     def __init__(self):
@@ -53,6 +60,11 @@ class Component(ComponentBase):
         table_name = self.get_table_name()
         query = self.get_query()
 
+        with self._custom_query_errors():
+            self._export(query, table_name)
+        self._connection.close()
+
+    def _export(self, query: str, table_name: str):
         if self.params.destination.parquet_output:
             out_file = self.create_out_file_definition(f"{table_name}.parquet")
             q = f" COPY ({query}) TO '{out_file.full_path}'; "
@@ -85,11 +97,28 @@ class Component(ComponentBase):
                 raise UserException(f"Error during query execution: {e}")
 
             self.write_manifest(out_table)
-        self._connection.close()
 
-    def init_connection(self) -> DuckDBPyConnection:
+    @contextmanager
+    def _custom_query_errors(self):
+        """Reports an invalid custom query as a user error, with a hint when it does not use in_table."""
+        try:
+            yield
+        except (duckdb.BinderException, duckdb.CatalogException, duckdb.ParserException) as e:
+            if self.params.data_selection.mode != DataSelectionMode.custom_query:
+                raise
+            message = f"The custom query failed: {e}"
+            if not IN_TABLE_PATTERN.search(self.params.data_selection.query.lower()):
+                message += (
+                    " In 'Custom Query' mode, reference the selected source table as in_table,"
+                    " e.g. SELECT * FROM in_table. To query tables by their full catalog.schema.table name,"
+                    " use the 'Databricks SQL Query' load type."
+                )
+            raise UserException(message) from e
+
+    def init_connection(self, needs_source: bool = False) -> DuckDBPyConnection:
         """
-        Returns connection to temporary DuckDB database
+        Returns connection to temporary DuckDB database.
+        With needs_source=True it can read the source table even in workspace_query mode (table preview).
         """
         os.makedirs(DUCK_DB_DIR, exist_ok=True)
         # TODO: On GCP consider changin tmp to /opt/tmp
@@ -103,7 +132,7 @@ class Component(ComponentBase):
 
         # In workspace_query mode the query is executed on the Databricks warehouse and only the staged
         # result parquet is read locally, so no cloud storage secret is needed.
-        if self.params.data_selection.mode != DataSelectionMode.workspace_query:
+        if needs_source or self.params.data_selection.mode != DataSelectionMode.workspace_query:
             conn.execute(self.build_connection_query())
 
         if not self.params.destination.preserve_insertion_order:
@@ -117,12 +146,44 @@ class Component(ComponentBase):
         or with service principal (OAuth M2M) credentials, depending on the selected auth type.
         """
         if self.params.auth_type == AuthType.service_principal:
+            host = self.params.unity_catalog_url
+            extra = {}
+            if urlsplit(host).port:
+                extra["credentials_strategy"] = self._oauth_m2m_on_host(host)
             return WorkspaceClient(
-                host=self.params.unity_catalog_url,
+                host=host,
                 client_id=self.params.unity_catalog_client_id,
                 client_secret=self.params.unity_catalog_client_secret,
+                **extra,
             )
         return WorkspaceClient(host=self.params.unity_catalog_url, token=self.params.unity_catalog_token)
+
+    @staticmethod
+    def _oauth_m2m_on_host(host: str) -> CredentialsStrategy:
+        """
+        OAuth M2M with the token endpoint on the configured host, port included.
+        The SDK takes the OIDC endpoints from the workspace metadata, which names the host without the port,
+        so behind a gateway on a non-default port the token request times out after 5 minutes.
+        """
+        token_url = f"{host.rstrip('/')}/oidc/v1/token"
+
+        @credentials_strategy("oauth-m2m", ["host", "client_id", "client_secret"])
+        def strategy(cfg) -> OAuthCredentialsProvider:
+            token_source = oauth.ClientCredentials(
+                client_id=cfg.client_id,
+                client_secret=cfg.client_secret,
+                token_url=token_url,
+                scopes=cfg.get_scopes_as_string(),
+                use_header=True,
+            )
+
+            def headers() -> dict[str, str]:
+                token = token_source.token()
+                return {"Authorization": f"{token.token_type} {token.access_token}"}
+
+            return OAuthCredentialsProvider(headers, token_source.token)
+
+        return strategy
 
     def _execute_workspace_query(
         self, query: str, row_limit: int = None, poll_timeout: int = STATEMENT_POLL_TIMEOUT
@@ -252,10 +313,24 @@ class Component(ComponentBase):
 
     def build_connection_query(self):
         session_token = None
+        blob_endpoint = None
         if self.params.access_method == AccessMethod.unity_catalog:
             w = self._get_workspace_client()
 
             temp_creds = self._get_temp_credentials(w)
+            if temp_creds.aws_temp_credentials:
+                credential_type = "aws_temp_credentials"
+            elif temp_creds.azure_user_delegation_sas:
+                credential_type = "azure_user_delegation_sas"
+            else:
+                credential_type = "none"
+            # The URL itself carries no signature (the SAS is a separate field), so it is safe to log.
+            logging.debug(
+                "Unity Catalog temporary credentials: url='%s', credential_type=%s, expiration_time=%s",
+                temp_creds.url,
+                credential_type,
+                getattr(temp_creds, "expiration_time", None),
+            )
             self.source_uri = temp_creds.url
 
             if temp_creds.aws_temp_credentials:
@@ -267,12 +342,18 @@ class Component(ComponentBase):
 
             elif temp_creds.azure_user_delegation_sas:
                 self.params.provider = "abs"
-                try:
-                    # url should always have this pattern: ...@ACCOUNT_NAME.dfs... https://docs.databricks.com/aws/en/connect/storage/azure-storage?language=Account%C2%A0key#access-azure-storage  # noqa: E501
-                    self.params.abs_account_name = temp_creds.url.split("@")[1].split(".dfs")[0]
-                except IndexError:
-                    raise IndexError(f"Unable to extract account name from storage URL: {temp_creds.url}")
+                # url always has this pattern: ...@ACCOUNT_NAME.dfs... https://docs.databricks.com/aws/en/connect/storage/azure-storage?language=Account%C2%A0key#access-azure-storage  # noqa: E501
+                self.params.abs_account_name, blob_endpoint, self.source_uri = self._abfss_to_blob(
+                    temp_creds.url, self.params.abs_port
+                )
                 self.params.abs_sas_token = temp_creds.azure_user_delegation_sas.sas_token
+                logging.debug(
+                    "Extracted storage account name '%s' from the credentials URL; "
+                    "user delegation SAS received (%s chars, value not logged).",
+                    self.params.abs_account_name,
+                    len(self.params.abs_sas_token or ""),
+                )
+                logging.debug("Source URI used for delta_scan: '%s'", self.source_uri)
 
             else:
                 raise UserException(
@@ -284,6 +365,18 @@ class Component(ComponentBase):
                 abs_conn_str = (
                     f"AccountName={self.params.abs_account_name};SharedAccessSignature={self.params.abs_sas_token}"
                 )
+                if not blob_endpoint and self.params.abs_port:
+                    # Direct storage: az:// URIs carry no host, so the port can only be passed
+                    # through an explicit endpoint in the connection string.
+                    blob_endpoint = (
+                        f"https://{self.params.abs_account_name}.blob.core.windows.net:{self.params.abs_port}"
+                    )
+                if blob_endpoint:
+                    # Pins host and port for both readers of a delta_scan: the C++ azure extension
+                    # (straight from BlobEndpoint) and delta's Rust object_store (duckdb-delta forwards
+                    # BlobEndpoint on as its azure_endpoint option).
+                    abs_conn_str += f";BlobEndpoint={blob_endpoint}"
+                    logging.debug("Azure secret uses an explicit BlobEndpoint '%s'.", blob_endpoint)
                 query = f"""
                         CREATE SECRET (
                             TYPE AZURE,
@@ -312,6 +405,55 @@ class Component(ComponentBase):
                 raise UserException(f"Unknown provider: {self.params.provider}")
 
         return query
+
+    @staticmethod
+    def _abfss_to_blob(url: str, fallback_port: int | None = None) -> tuple[str, str | None, str]:
+        """
+        Re-addresses a Unity Catalog storage URL onto the Blob endpoint when a non-default port is in effect.
+
+        Unity Catalog hands out `abfss://<container>@<account>.dfs.<suffix>[:<port>]/<path>`, but that
+        DFS route cannot honour a non-standard port. The Azure SDK for C++ builds its DataLake service
+        URL from the connection string's `DfsEndpoint` key alone and otherwise rebuilds it from
+        `AccountName`, so neither the port in the URL nor a `BlobEndpoint` pinning host:port reaches
+        the reader, and it falls back to 443 (duckdb/duckdb-azure#77). Addressing the same data as
+        `az://<container>/<path>` with an explicit `BlobEndpoint` keeps the port, and is the
+        combination duckdb-azure and duckdb-delta test against Azurite (itself on a non-default port).
+
+        The port is taken from the credentials URL when Databricks states one; otherwise
+        `fallback_port` (the configured `abs_port`) is applied, because a private-endpoint workspace
+        can hand out a portless URL even when the storage endpoint is not on 443. Without any port the
+        URL is returned unchanged and no endpoint is pinned, so default-port accounts read exactly as before.
+
+        Returns (account_name, blob_endpoint or None, duckdb_uri).
+        """
+        parts = urlsplit(url)
+        try:
+            container, host, port = parts.username, parts.hostname, parts.port
+        except ValueError:
+            # An unparseable port makes .port raise rather than return None.
+            raise UserException(f"Unable to parse the storage URL returned by Unity Catalog: {url}")
+
+        if not container or not host or "." not in host:
+            raise UserException(
+                "Unexpected storage URL returned by Unity Catalog, expected "
+                f"abfss://<container>@<account>.dfs.<suffix>/<path>: {url}"
+            )
+
+        if port and fallback_port and fallback_port != port:
+            logging.debug(
+                "Configured storage port %s overridden by port %s stated in the credentials URL.",
+                fallback_port,
+                port,
+            )
+        port = port or fallback_port
+
+        account = host.split(".", 1)[0]
+        if not port:
+            return account, None, url
+
+        # The DFS and Blob endpoints of an account differ only in this label.
+        blob_endpoint = f"https://{host.replace('.dfs.', '.blob.', 1)}:{port}"
+        return account, blob_endpoint, f"az://{container}/{parts.path.lstrip('/')}"
 
     def build_source_uri(self):
         match self.params.provider:
@@ -347,9 +489,7 @@ class Component(ComponentBase):
             # The user's SQL already ran on the warehouse; here we only read the staged result.
             query = f"SELECT * FROM read_parquet('{self._workspace_result_glob}')"
         elif mode == DataSelectionMode.custom_query:
-            query = self.params.data_selection.query.lower().replace(
-                "from in_table ", f"FROM delta_scan('{self.source_uri}')"
-            )
+            query = self._resolve_in_table(self.params.data_selection.query)
         elif mode == DataSelectionMode.select_columns:
             query = f"""
             SELECT {", ".join(self.params.data_selection.columns)}
@@ -360,6 +500,9 @@ class Component(ComponentBase):
             raise UserException("Invalid data selection mode")
 
         return query
+
+    def _resolve_in_table(self, query: str) -> str:
+        return IN_TABLE_PATTERN.sub(f"FROM delta_scan('{self.source_uri}')", query.lower())
 
     @staticmethod
     def _is_complex_duckdb_type(normalized_dtype: str) -> bool:
@@ -427,7 +570,7 @@ class Component(ComponentBase):
 
     @sync_action("list_columns")
     def list_columns(self):
-        self._connection = self.init_connection()
+        self._connection = self.init_connection(needs_source=True)
 
         out = self._connection.execute(f"""
         DESCRIBE
@@ -440,7 +583,7 @@ class Component(ComponentBase):
 
     @sync_action("table_preview")
     def table_preview(self):
-        self._connection = self.init_connection()
+        self._connection = self.init_connection(needs_source=True)
 
         out = self._connection.execute(f"""
                 SELECT *
@@ -462,14 +605,13 @@ class Component(ComponentBase):
     def query_preview(self):
         self._connection = self.init_connection()
 
-        query = self.params.data_selection.query.lower().replace(
-            "from in_table", f"FROM delta_scan('{self.source_uri}')"
-        )
+        query = self._resolve_in_table(self.params.data_selection.query)
 
         if "limit" not in query.lower():
             query = f"{query} LIMIT 10;"
 
-        out = self._connection.execute(query).pl()
+        with self._custom_query_errors():
+            out = self._connection.execute(query).pl()
 
         formatted_output = self.to_markdown(out)
 

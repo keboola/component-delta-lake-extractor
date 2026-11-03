@@ -5,6 +5,7 @@ from types import SimpleNamespace as NS
 
 from freezegun import freeze_time
 
+import duckdb
 import pyarrow as pa
 from databricks.sdk.service.sql import StatementState
 from keboola.component.dao import SupportedDataTypes
@@ -123,6 +124,26 @@ class TestComponent(unittest.TestCase):
             client_secret="client-secret",
         )
 
+    @mock.patch("component.WorkspaceClient")
+    def test_get_workspace_client_service_principal_with_port_uses_host_token_endpoint(self, wc):
+        comp = make_component(
+            auth_type="service_principal",
+            unity_catalog_url="https://workspace.example.com:12345",
+            unity_catalog_client_id="client-id",
+            **{"#unity_catalog_client_secret": "client-secret"},
+        )
+        comp._get_workspace_client()
+
+        strategy = wc.call_args.kwargs["credentials_strategy"]
+        self.assertEqual(strategy.auth_type(), "oauth-m2m")
+        cfg = NS(host="https://workspace.example.com:12345", client_id="client-id", client_secret="client-secret",
+                 group_id=None, get_scopes_as_string=lambda: "all-apis")
+        with mock.patch("component.oauth.ClientCredentials") as cc:
+            strategy(cfg)
+        # The workspace metadata names the host without the port, so the token URL must come from the config.
+        self.assertEqual(cc.call_args.kwargs["token_url"], "https://workspace.example.com:12345/oidc/v1/token")
+        self.assertEqual(cc.call_args.kwargs["client_id"], "client-id")
+
     # --- query building & naming ------------------------------------------------------
 
     def test_get_query_workspace_query(self):
@@ -137,6 +158,75 @@ class TestComponent(unittest.TestCase):
         comp = make_component(data_selection={"mode": "all_data"})
         comp.source_uri = "az://container/blob"
         self.assertEqual(comp.get_query(), "SELECT * FROM delta_scan('az://container/blob')")
+
+    def test_get_query_custom_query_resolves_in_table_at_end_of_query(self):
+        comp = make_component(data_selection={"mode": "custom_query", "query": "SELECT * FROM in_table"})
+        comp.source_uri = "az://container/blob"
+        self.assertEqual(comp.get_query(), "select * FROM delta_scan('az://container/blob')")
+
+    def test_get_query_custom_query_resolves_in_table_before_where(self):
+        comp = make_component(
+            data_selection={"mode": "custom_query", "query": "SELECT id FROM\nin_table WHERE id > 1"}
+        )
+        comp.source_uri = "az://container/blob"
+        self.assertEqual(comp.get_query(), "select id FROM delta_scan('az://container/blob') where id > 1")
+
+    # --- custom query errors ----------------------------------------------------------
+
+    def _run_custom_query(self, comp, sql):
+        conn = duckdb.connect()
+        with comp._custom_query_errors():
+            conn.execute(sql)
+
+    def test_custom_query_without_in_table_gets_hint(self):
+        query = "SELECT * FROM my_catalog.default.test"
+        comp = make_component(data_selection={"mode": "custom_query", "query": query})
+
+        with self.assertRaises(UserException) as ctx:
+            self._run_custom_query(comp, query)
+
+        self.assertIn('Catalog "my_catalog" does not exist', str(ctx.exception))
+        self.assertIn("SELECT * FROM in_table", str(ctx.exception))
+        self.assertIn("'Databricks SQL Query' load type", str(ctx.exception))
+
+    def test_custom_query_with_in_table_gets_no_hint(self):
+        comp = make_component(data_selection={"mode": "custom_query", "query": "SELECT nope FROM in_table"})
+
+        with self.assertRaises(UserException) as ctx:
+            self._run_custom_query(comp, "SELECT nope FROM range(1)")
+
+        self.assertIn("The custom query failed", str(ctx.exception))
+        self.assertNotIn("Databricks SQL Query", str(ctx.exception))
+
+    def test_query_errors_in_other_modes_are_not_changed(self):
+        comp = make_component(data_selection={"mode": "all_data"})
+
+        with self.assertRaises(duckdb.CatalogException):
+            self._run_custom_query(comp, "SELECT * FROM missing_table")
+
+    # --- connection setup -------------------------------------------------------------
+
+    @mock.patch("component.os.makedirs")
+    @mock.patch("component.duckdb.connect")
+    def test_workspace_query_connection_skips_source_credentials(self, _connect, _md):
+        comp = make_component(data_selection={"mode": "workspace_query", "query": "SELECT 1"})
+        comp.build_connection_query = mock.MagicMock()
+
+        comp.init_connection()
+
+        comp.build_connection_query.assert_not_called()
+
+    @mock.patch("component.os.makedirs")
+    @mock.patch("component.duckdb.connect")
+    def test_table_preview_connection_loads_source_credentials_in_workspace_query_mode(self, connect, _md):
+        # The Table preview button reads the selected table even when the row runs a Databricks SQL query.
+        comp = make_component(data_selection={"mode": "workspace_query", "query": "SELECT 1"})
+        comp.build_connection_query = mock.MagicMock(return_value="CREATE SECRET ...")
+
+        comp.init_connection(needs_source=True)
+
+        comp.build_connection_query.assert_called_once()
+        connect.return_value.execute.assert_any_call("CREATE SECRET ...")
 
     def test_get_table_name_fallback_for_workspace_query(self):
         comp = make_component(data_selection={"mode": "workspace_query", "query": "SELECT 1"})
@@ -322,6 +412,182 @@ class TestComponent(unittest.TestCase):
         for (type_name, precision, scale), expected in cases.items():
             col = fake_column("c", type_name, precision, scale)
             self.assertEqual(Component._arrow_type_from_column(col), expected, msg=type_name)
+
+    # --- azure storage port -----------------------------------------------------------
+
+    def test_abs_connection_query_without_port_has_no_endpoint(self):
+        comp = make_component(
+            access_method="direct_storage",
+            provider="abs",
+            abs_account_name="acct",
+            **{"#abs_sas_token": "sv=2024"},
+        )
+        query = comp.build_connection_query()
+        self.assertIn("AccountName=acct;SharedAccessSignature=sv=2024", query)
+        self.assertNotIn("BlobEndpoint", query)
+
+    def test_abs_connection_query_with_port_sets_blob_endpoint(self):
+        comp = make_component(
+            access_method="direct_storage",
+            provider="abs",
+            abs_account_name="acct",
+            abs_port=10000,
+            **{"#abs_sas_token": "sv=2024"},
+        )
+        query = comp.build_connection_query()
+        self.assertIn("BlobEndpoint=https://acct.blob.core.windows.net:10000", query)
+
+    def test_abfss_to_blob_keeps_port(self):
+        self.assertEqual(
+            Component._abfss_to_blob("abfss://cont@acct.dfs.core.windows.net:10000/schema/table"),
+            ("acct", "https://acct.blob.core.windows.net:10000", "az://cont/schema/table"),
+        )
+
+    def test_abfss_to_blob_without_port_keeps_url(self):
+        url = "abfss://cont@acct.dfs.core.windows.net/schema/table"
+        self.assertEqual(Component._abfss_to_blob(url), ("acct", None, url))
+
+    def test_abfss_to_blob_rejects_unexpected_url(self):
+        for url in ("abfss://acct.dfs.core.windows.net/table", "https://acct/table"):
+            with self.assertRaises(UserException, msg=url):
+                Component._abfss_to_blob(url)
+
+    def test_abfss_to_blob_rejects_invalid_port(self):
+        with self.assertRaises(UserException):
+            Component._abfss_to_blob("abfss://cont@acct.dfs.core.windows.net:nope/table")
+
+    def test_abfss_to_blob_falls_back_to_configured_port(self):
+        # A private-endpoint workspace can return a portless URL even when storage is not on 443.
+        self.assertEqual(
+            Component._abfss_to_blob("abfss://cont@acct.dfs.core.windows.net/schema/table", 12345),
+            ("acct", "https://acct.blob.core.windows.net:12345", "az://cont/schema/table"),
+        )
+
+    def test_abfss_to_blob_url_port_wins_over_fallback(self):
+        self.assertEqual(
+            Component._abfss_to_blob("abfss://cont@acct.dfs.core.windows.net:8443/schema/table", 12345)[1],
+            "https://acct.blob.core.windows.net:8443",
+        )
+
+    def test_unity_catalog_uses_blob_endpoint_with_port_from_url(self):
+        comp = make_component()
+        comp._get_workspace_client = lambda: mock.MagicMock()
+        comp._get_temp_credentials = lambda w: NS(
+            url="abfss://cont@acct.dfs.core.windows.net:10000/schema/table",
+            aws_temp_credentials=None,
+            azure_user_delegation_sas=NS(sas_token="sv=2024"),
+        )
+
+        query = comp.build_connection_query()
+
+        # The abfss/DFS route cannot honour the port, so the data is addressed over blob instead.
+        self.assertEqual(comp.source_uri, "az://cont/schema/table")
+        self.assertIn("AccountName=acct;", query)
+        self.assertIn("BlobEndpoint=https://acct.blob.core.windows.net:10000", query)
+
+    def test_unity_catalog_without_port_is_unchanged(self):
+        comp = make_component()
+        comp._get_workspace_client = lambda: mock.MagicMock()
+        comp._get_temp_credentials = lambda w: NS(
+            url="abfss://cont@acct.dfs.core.windows.net/schema/table",
+            aws_temp_credentials=None,
+            azure_user_delegation_sas=NS(sas_token="sv=2024"),
+        )
+
+        query = comp.build_connection_query()
+
+        # No port anywhere: the abfss URL and the plain connection string stay exactly as before.
+        self.assertEqual(comp.source_uri, "abfss://cont@acct.dfs.core.windows.net/schema/table")
+        self.assertIn("CONNECTION_STRING 'AccountName=acct;SharedAccessSignature=sv=2024'", query)
+        self.assertNotIn("BlobEndpoint", query)
+
+    def test_unity_catalog_portless_url_uses_configured_port(self):
+        # A private-endpoint workspace can return a portless URL, so abs_port is the only source of the port.
+        comp = make_component(abs_port=12345)
+        comp._get_workspace_client = lambda: mock.MagicMock()
+        comp._get_temp_credentials = lambda w: NS(
+            url="abfss://cont@acct.dfs.core.windows.net/schema/table",
+            aws_temp_credentials=None,
+            azure_user_delegation_sas=NS(sas_token="sv=2024"),
+        )
+
+        query = comp.build_connection_query()
+
+        self.assertEqual(comp.source_uri, "az://cont/schema/table")
+        self.assertIn("BlobEndpoint=https://acct.blob.core.windows.net:12345", query)
+
+    def test_unity_catalog_prefers_url_port_over_configured_port(self):
+        comp = make_component(abs_port=10000)
+        comp._get_workspace_client = lambda: mock.MagicMock()
+        comp._get_temp_credentials = lambda w: NS(
+            url="abfss://cont@acct.dfs.core.windows.net:8443/schema/table",
+            aws_temp_credentials=None,
+            azure_user_delegation_sas=NS(sas_token="sv=2024"),
+        )
+
+        query = comp.build_connection_query()
+
+        self.assertIn("BlobEndpoint=https://acct.blob.core.windows.net:8443", query)
+        self.assertNotIn("10000", query)
+
+    def test_direct_storage_abs_source_uri_ignores_port(self):
+        comp = make_component(
+            access_method="direct_storage",
+            provider="abs",
+            abs_account_name="acct",
+            abs_port=10000,
+            source={"container_name": "cont", "blob_name": "tbl"},
+        )
+        self.assertEqual(comp.build_source_uri(), "az://cont/tbl")
+
+    def test_abs_port_empty_string_is_none(self):
+        comp = make_component(abs_port="")
+        self.assertIsNone(comp.params.abs_port)
+
+    def test_abs_port_out_of_range_raises_user_exception(self):
+        with self.assertRaises(UserException):
+            make_component(abs_port=99999)
+
+    # --- debug logging ----------------------------------------------------------------
+
+    def test_unity_catalog_debug_log_reports_url_and_target(self):
+        comp = make_component()
+        comp._get_workspace_client = lambda: mock.MagicMock()
+        comp._get_temp_credentials = lambda w: NS(
+            url="abfss://cont@acct.dfs.core.windows.net:10000/schema/table",
+            aws_temp_credentials=None,
+            azure_user_delegation_sas=NS(sas_token="sv=2024&sig=SECRETSAS"),
+            expiration_time=1700000000,
+        )
+
+        with self.assertLogs(level="DEBUG") as logs:
+            comp.build_connection_query()
+        output = "\n".join(logs.output)
+
+        # what Unity Catalog returned
+        self.assertIn("abfss://cont@acct.dfs.core.windows.net:10000/schema/table", output)
+        self.assertIn("azure_user_delegation_sas", output)
+        self.assertIn("acct", output)
+        # where the read is actually addressed
+        self.assertIn("az://cont/schema/table", output)
+        self.assertIn("BlobEndpoint 'https://acct.blob.core.windows.net:10000'", output)
+        # the SAS token itself must never be logged
+        self.assertNotIn("SECRETSAS", output)
+        self.assertNotIn("sig=", output)
+
+    def test_unity_catalog_debug_log_notes_overridden_port(self):
+        comp = make_component(abs_port=10000)
+        comp._get_workspace_client = lambda: mock.MagicMock()
+        comp._get_temp_credentials = lambda w: NS(
+            url="abfss://cont@acct.dfs.core.windows.net:8443/schema/table",
+            aws_temp_credentials=None,
+            azure_user_delegation_sas=NS(sas_token="sv=2024"),
+        )
+
+        with self.assertLogs(level="DEBUG") as logs:
+            comp.build_connection_query()
+
+        self.assertIn("overridden", "\n".join(logs.output).lower())
 
     # --- sync action ------------------------------------------------------------------
 

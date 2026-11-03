@@ -125,6 +125,12 @@ jobs:
           echo "Running unit-tests..."
           docker run ${{ env.KBC_DEVELOPERPORTAL_APP }}:latest python -m unittest discover
 
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azurite Non-Default Port Test
+        run: sh scripts/azurite_test.sh ${{ env.KBC_DEVELOPERPORTAL_APP }}:latest
+
   tests-kbc:
     name: Run KBC Tests
     needs:
