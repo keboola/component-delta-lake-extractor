@@ -5,6 +5,7 @@ from types import SimpleNamespace as NS
 
 from freezegun import freeze_time
 
+import duckdb
 import pyarrow as pa
 from databricks.sdk.service.sql import StatementState
 from keboola.component.dao import SupportedDataTypes
@@ -137,6 +138,75 @@ class TestComponent(unittest.TestCase):
         comp = make_component(data_selection={"mode": "all_data"})
         comp.source_uri = "az://container/blob"
         self.assertEqual(comp.get_query(), "SELECT * FROM delta_scan('az://container/blob')")
+
+    def test_get_query_custom_query_resolves_in_table_at_end_of_query(self):
+        comp = make_component(data_selection={"mode": "custom_query", "query": "SELECT * FROM in_table"})
+        comp.source_uri = "az://container/blob"
+        self.assertEqual(comp.get_query(), "select * FROM delta_scan('az://container/blob')")
+
+    def test_get_query_custom_query_resolves_in_table_before_where(self):
+        comp = make_component(
+            data_selection={"mode": "custom_query", "query": "SELECT id FROM\nin_table WHERE id > 1"}
+        )
+        comp.source_uri = "az://container/blob"
+        self.assertEqual(comp.get_query(), "select id FROM delta_scan('az://container/blob') where id > 1")
+
+    # --- custom query errors ----------------------------------------------------------
+
+    def _run_custom_query(self, comp, sql):
+        conn = duckdb.connect()
+        with comp._custom_query_errors():
+            conn.execute(sql)
+
+    def test_custom_query_without_in_table_gets_hint(self):
+        query = "SELECT * FROM my_catalog.default.test"
+        comp = make_component(data_selection={"mode": "custom_query", "query": query})
+
+        with self.assertRaises(UserException) as ctx:
+            self._run_custom_query(comp, query)
+
+        self.assertIn('Catalog "my_catalog" does not exist', str(ctx.exception))
+        self.assertIn("SELECT * FROM in_table", str(ctx.exception))
+        self.assertIn("'Databricks SQL Query' load type", str(ctx.exception))
+
+    def test_custom_query_with_in_table_gets_no_hint(self):
+        comp = make_component(data_selection={"mode": "custom_query", "query": "SELECT nope FROM in_table"})
+
+        with self.assertRaises(UserException) as ctx:
+            self._run_custom_query(comp, "SELECT nope FROM range(1)")
+
+        self.assertIn("The custom query failed", str(ctx.exception))
+        self.assertNotIn("Databricks SQL Query", str(ctx.exception))
+
+    def test_query_errors_in_other_modes_are_not_changed(self):
+        comp = make_component(data_selection={"mode": "all_data"})
+
+        with self.assertRaises(duckdb.CatalogException):
+            self._run_custom_query(comp, "SELECT * FROM missing_table")
+
+    # --- connection setup -------------------------------------------------------------
+
+    @mock.patch("component.os.makedirs")
+    @mock.patch("component.duckdb.connect")
+    def test_workspace_query_connection_skips_source_credentials(self, _connect, _md):
+        comp = make_component(data_selection={"mode": "workspace_query", "query": "SELECT 1"})
+        comp.build_connection_query = mock.MagicMock()
+
+        comp.init_connection()
+
+        comp.build_connection_query.assert_not_called()
+
+    @mock.patch("component.os.makedirs")
+    @mock.patch("component.duckdb.connect")
+    def test_table_preview_connection_loads_source_credentials_in_workspace_query_mode(self, connect, _md):
+        # The Table preview button reads the selected table even when the row runs a Databricks SQL query.
+        comp = make_component(data_selection={"mode": "workspace_query", "query": "SELECT 1"})
+        comp.build_connection_query = mock.MagicMock(return_value="CREATE SECRET ...")
+
+        comp.init_connection(needs_source=True)
+
+        comp.build_connection_query.assert_called_once()
+        connect.return_value.execute.assert_any_call("CREATE SECRET ...")
 
     def test_get_table_name_fallback_for_workspace_query(self):
         comp = make_component(data_selection={"mode": "workspace_query", "query": "SELECT 1"})

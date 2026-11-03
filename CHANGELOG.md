@@ -23,11 +23,23 @@
   `az://<container>/<path>` and pins `BlobEndpoint` (with the port) in the DuckDB Azure secret. Both
   readers of a `delta_scan` honour it: the azure extension reads `BlobEndpoint` directly, and
   duckdb-delta forwards it as the `azure_endpoint` of its Rust object_store.
+- **Table preview and column list in "Databricks SQL Query" mode.** Both failed with
+  `Path does not exist: "None/"`, because that mode skipped the storage credentials. They now load
+  the credentials of the selected table.
+- **Custom Query errors.** An invalid query (for example a full `catalog.schema.table` name, which
+  DuckDB reports as `Catalog ... does not exist`) failed the job with an internal error. It is now a
+  user error. When the query does not use `in_table`, the message explains to use `in_table` or the
+  "Databricks SQL Query" load type.
+- **Custom Query ending in `FROM in_table`.** A job replaced `in_table` only when a space followed it,
+  so `SELECT * FROM in_table` worked in Query preview but failed in the job. The job and the preview
+  now resolve `in_table` the same way, also when a line break follows `FROM`.
 
 ### ⚠️ Backward compatibility
 - Opt-in only. Without a port (field empty and no port in the Unity Catalog URL), the connection
   string and source URI are identical to 0.1.1, so existing configurations read exactly as before.
 - A malformed Unity Catalog storage URL now fails with a user error instead of an internal error.
+- Custom queries that already worked resolve `in_table` exactly as before. Only queries that failed
+  before now run or fail with a user error.
 
 ## [CFTL-719] Service principal auth + Databricks SQL query mode
 

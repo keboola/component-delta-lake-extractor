@@ -1,8 +1,10 @@
 import io
 import logging
 import os
+import re
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 import requests
@@ -37,6 +39,9 @@ CLOUD_FETCH_TIMEOUT = (10, 300)
 STATEMENT_POLL_TIMEOUT = 1200
 PREVIEW_POLL_TIMEOUT = 25
 
+# The custom query is lowercased before the in_table placeholder is replaced.
+IN_TABLE_PATTERN = re.compile(r"\bfrom\s+in_table\b")
+
 
 class Component(ComponentBase):
     def __init__(self):
@@ -54,6 +59,11 @@ class Component(ComponentBase):
         table_name = self.get_table_name()
         query = self.get_query()
 
+        with self._custom_query_errors():
+            self._export(query, table_name)
+        self._connection.close()
+
+    def _export(self, query: str, table_name: str):
         if self.params.destination.parquet_output:
             out_file = self.create_out_file_definition(f"{table_name}.parquet")
             q = f" COPY ({query}) TO '{out_file.full_path}'; "
@@ -86,11 +96,28 @@ class Component(ComponentBase):
                 raise UserException(f"Error during query execution: {e}")
 
             self.write_manifest(out_table)
-        self._connection.close()
 
-    def init_connection(self) -> DuckDBPyConnection:
+    @contextmanager
+    def _custom_query_errors(self):
+        """Reports an invalid custom query as a user error, with a hint when it does not use in_table."""
+        try:
+            yield
+        except (duckdb.BinderException, duckdb.CatalogException, duckdb.ParserException) as e:
+            if self.params.data_selection.mode != DataSelectionMode.custom_query:
+                raise
+            message = f"The custom query failed: {e}"
+            if not IN_TABLE_PATTERN.search(self.params.data_selection.query.lower()):
+                message += (
+                    " In 'Custom Query' mode, reference the selected source table as in_table,"
+                    " e.g. SELECT * FROM in_table. To query tables by their full catalog.schema.table name,"
+                    " use the 'Databricks SQL Query' load type."
+                )
+            raise UserException(message) from e
+
+    def init_connection(self, needs_source: bool = False) -> DuckDBPyConnection:
         """
-        Returns connection to temporary DuckDB database
+        Returns connection to temporary DuckDB database.
+        With needs_source=True it can read the source table even in workspace_query mode (table preview).
         """
         os.makedirs(DUCK_DB_DIR, exist_ok=True)
         # TODO: On GCP consider changin tmp to /opt/tmp
@@ -104,7 +131,7 @@ class Component(ComponentBase):
 
         # In workspace_query mode the query is executed on the Databricks warehouse and only the staged
         # result parquet is read locally, so no cloud storage secret is needed.
-        if self.params.data_selection.mode != DataSelectionMode.workspace_query:
+        if needs_source or self.params.data_selection.mode != DataSelectionMode.workspace_query:
             conn.execute(self.build_connection_query())
 
         if not self.params.destination.preserve_insertion_order:
@@ -429,9 +456,7 @@ class Component(ComponentBase):
             # The user's SQL already ran on the warehouse; here we only read the staged result.
             query = f"SELECT * FROM read_parquet('{self._workspace_result_glob}')"
         elif mode == DataSelectionMode.custom_query:
-            query = self.params.data_selection.query.lower().replace(
-                "from in_table ", f"FROM delta_scan('{self.source_uri}')"
-            )
+            query = self._resolve_in_table(self.params.data_selection.query)
         elif mode == DataSelectionMode.select_columns:
             query = f"""
             SELECT {", ".join(self.params.data_selection.columns)}
@@ -442,6 +467,9 @@ class Component(ComponentBase):
             raise UserException("Invalid data selection mode")
 
         return query
+
+    def _resolve_in_table(self, query: str) -> str:
+        return IN_TABLE_PATTERN.sub(f"FROM delta_scan('{self.source_uri}')", query.lower())
 
     @staticmethod
     def _is_complex_duckdb_type(normalized_dtype: str) -> bool:
@@ -509,7 +537,7 @@ class Component(ComponentBase):
 
     @sync_action("list_columns")
     def list_columns(self):
-        self._connection = self.init_connection()
+        self._connection = self.init_connection(needs_source=True)
 
         out = self._connection.execute(f"""
         DESCRIBE
@@ -522,7 +550,7 @@ class Component(ComponentBase):
 
     @sync_action("table_preview")
     def table_preview(self):
-        self._connection = self.init_connection()
+        self._connection = self.init_connection(needs_source=True)
 
         out = self._connection.execute(f"""
                 SELECT *
@@ -544,14 +572,13 @@ class Component(ComponentBase):
     def query_preview(self):
         self._connection = self.init_connection()
 
-        query = self.params.data_selection.query.lower().replace(
-            "from in_table", f"FROM delta_scan('{self.source_uri}')"
-        )
+        query = self._resolve_in_table(self.params.data_selection.query)
 
         if "limit" not in query.lower():
             query = f"{query} LIMIT 10;"
 
-        out = self._connection.execute(query).pl()
+        with self._custom_query_errors():
+            out = self._connection.execute(query).pl()
 
         formatted_output = self.to_markdown(out)
 
